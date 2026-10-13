@@ -14,10 +14,16 @@ A looper with a terminal UI (Bubble Tea), intended to run against a DAW
 
 ## Build (Windows)
 
-Requires: Go >= 1.24, zig (`winget install zig.zig`).
+Requires: Go >= 1.24, mingw-w64 gcc
+(`winget install BrechtSanders.WinLibs.POSIX.UCRT`).
 
-    .\build.ps1            # vet + build tuiper.exe (CGO via zig cc)
+    .\build.ps1            # vet + build tuiper.exe (CGO via mingw gcc)
     .\build.ps1 -Watch     # also run the headless demo smoke test
+    .\build.ps1 -Zig       # build with zig cc instead (slow on Windows)
+
+gcc runtimes are linked statically so the exe is self-contained. The zig
+path (tools/zigcc.cmd / tools/zigcxx.cmd shims) still works but is kept
+mainly for cross-compiling release targets later.
 
     .\tuiper.exe                       # TUI on real ports
     .\tuiper.exe -engine test -demo    # TUI on fake loopback + synthetic events
@@ -25,9 +31,10 @@ Requires: Go >= 1.24, zig (`winget install zig.zig`).
 ## Packaging notes (kept in mind for later)
 
 - `tools/zigcc.cmd` / `tools/zigcxx.cmd` are the only nonstandard build
-  machinery; a release build can run `go build` with CGO=1 and these CC shims
-  in CI. zig is also a native cross compiler, so Windows/macOS/Linux release
-  targets can come from one machine eventually.
+  machinery for the zig path; a release build can run `go build` with CGO=1
+  and `-Zig` (or gcc equivalents per host). zig is also a native cross
+  compiler, so Windows/macOS/Linux release targets can come from one machine
+  eventually.
 - The `test` engine proves a workflow with no hardware/toolchain lock-in.
 
 ## Roadmap (rough order)
