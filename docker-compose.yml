@@ -1,0 +1,52 @@
+# Development helpers for tuiper. Usage (Docker Desktop / any Linux engine):
+#
+#   docker compose run --rm dev                          # interactive shell
+#   docker compose run --rm tuiper -engine test -demo    # TUI on loopback
+#   docker compose run --rm tuiper -engine test -demo -watch 3s   # headless
+#   docker compose run --rm dev go test ./internal/...   # tests
+#   docker compose run --rm dev go vet ./...
+#
+# On a Linux host with real MIDI hardware (ALSA):
+#
+#   docker compose --profile midi run --rm tuiper-alsa -engine rtmidi
+name: tuiper
+
+x-dev: &dev
+  build: .
+  image: tuiper-dev
+  working_dir: /workspace
+  stdin_open: true
+  tty: true
+  environment:
+    - TERM=xterm-256color
+  volumes:
+    - .:/workspace
+    - go-build:/root/.cache/go-build
+    - go-mod:/go/pkg/mod
+
+services:
+  # interactive shell: docker compose run --rm dev [command]
+  dev:
+    <<: *dev
+
+  # terminal UI: docker compose run --rm tuiper [flags]
+  tuiper:
+    <<: *dev
+    entrypoint: ["go", "run", "./cmd/tuiper"]
+    command: []
+
+  # only useful on a Linux host; requires the `midi` profile
+  tuiper-alsa:
+    <<: *dev
+    profiles: ["midi"]
+    entrypoint: ["go", "run", "./cmd/tuiper"]
+    command: []
+    devices:
+      - /dev/snd:/dev/snd
+    group_add:
+      - audio
+
+volumes:
+  # durable caches so every `compose run` is fast
+  go-build:
+  go-mod:

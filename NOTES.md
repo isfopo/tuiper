@@ -25,6 +25,11 @@ gcc runtimes are linked statically so the exe is self-contained. The zig
 path (tools/zigcc.cmd / tools/zigcxx.cmd shims) still works but is kept
 mainly for cross-compiling release targets later.
 
+TUI development now happens in a Linux container (Dockerfile +
+docker-compose.yml; Go caches in named volumes, test engine for the TUI,
+ALSA via the `midi` profile on Linux hosts). Windows is the host-side path:
+real-hardware MIDI testing and release binaries.
+
     .\tuiper.exe                       # TUI on real ports
     .\tuiper.exe -engine test -demo    # TUI on fake loopback + synthetic events
 
