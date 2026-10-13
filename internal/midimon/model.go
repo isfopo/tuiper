@@ -50,9 +50,15 @@ type Model struct {
 
 // New returns a fresh monitor model. eng chooses the MIDI driver to work
 // with; demo enables the synthetic event sender (test engine only).
+//
+// The monitor is created here, not in togglePort: Update and togglePort work
+// on value copies of Model, so an assignment inside togglePort would never
+// reach the model the TUI keeps rendering (a nil-monitor panic on the first
+// portOpenedMsg).
 func New(eng *midi.Engine, demo bool) Model {
 	return Model{
 		eng:     eng,
+		monitor: midi.NewMonitor(eng),
 		demo:    demo,
 		openNum: -1,
 		status:  "ready",
