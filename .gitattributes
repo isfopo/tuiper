@@ -1,0 +1,4 @@
+# Make sure scripts keep LF endings — they are executed inside Linux containers.
+*.sh text eol=lf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

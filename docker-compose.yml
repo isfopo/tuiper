@@ -1,12 +1,18 @@
 # Development helpers for tuiper. Usage (Docker Desktop / any Linux engine):
 #
-#   docker compose run --rm dev                          # interactive shell
-#   docker compose run --rm tuiper -engine test -demo    # TUI on loopback
-#   docker compose run --rm tuiper -engine test -demo -watch 3s   # headless
-#   docker compose run --rm dev go test ./internal/...   # tests
-#   docker compose run --rm dev go vet ./...
+#   docker compose run --rm dev                                 # interactive shell
+#   docker compose run --rm dev go test ./internal/...          # tests
+#   docker compose run --rm dev go vet ./...                    # vet
+#   docker compose run --rm tuiper -engine test -demo           # TUI on loopback
+#   docker compose run --rm tuiper -engine test -demo -watch 3s # headless MIDI check
+#   docker compose run --rm tuiper -audio 3s                    # audio devices + capture meter (PipeWire)
+#   docker compose run --rm tuiper -audio 3s -loopback          # capture -> playback round trip
 #
-# On a Linux host with real MIDI hardware (ALSA):
+# Every service starts with a private PipeWire session (audio + MIDI), so
+# -engine rtmidi enumerates ALSA ports and -audio sees real (virtual) ALSA
+# devices without host hardware.
+#
+# On a Linux host with real MIDI/audio hardware (ALSA):
 #
 #   docker compose --profile midi run --rm tuiper-alsa -engine rtmidi
 name: tuiper
@@ -15,6 +21,7 @@ x-dev: &dev
   build: .
   image: tuiper-dev
   working_dir: /workspace
+  entrypoint: ["/workspace/scripts/container-entrypoint.sh"]
   stdin_open: true
   tty: true
   environment:
@@ -25,22 +32,21 @@ x-dev: &dev
     - go-mod:/go/pkg/mod
 
 services:
-  # interactive shell: docker compose run --rm dev [command]
+  # interactive shell / arbitrary commands: docker compose run --rm dev [cmd]
   dev:
     <<: *dev
 
-  # terminal UI: docker compose run --rm tuiper [flags]
+  # tuiper itself: `docker compose run --rm tuiper [flags]`; a leading flag
+  # is auto-wrapped into `go run ./cmd/tuiper` by the entrypoint script
   tuiper:
     <<: *dev
-    entrypoint: ["go", "run", "./cmd/tuiper"]
-    command: []
 
-  # only useful on a Linux host; requires the `midi` profile
+  # only useful on a Linux host; requires the `midi` profile. Same as above
+  # but /dev/snd from the host is mounted, so rtmidi/-audio talk to the real
+  # ALSA hardware instead of the in-container PipeWire devices.
   tuiper-alsa:
     <<: *dev
     profiles: ["midi"]
-    entrypoint: ["go", "run", "./cmd/tuiper"]
-    command: []
     devices:
       - /dev/snd:/dev/snd
     group_add:
