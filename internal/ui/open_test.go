@@ -1,4 +1,4 @@
-package midimon
+package ui
 
 import (
 	"testing"

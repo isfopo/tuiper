@@ -17,7 +17,7 @@
 //     stops itself instead of being adopted).
 //   - meter reads happen on Update; View only reads the plain display fields
 //     filled by Update between renders.
-package midimon
+package ui
 
 import (
 	"sync/atomic"

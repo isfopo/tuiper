@@ -1,6 +1,7 @@
-// Package midimon implements the first tuiper milestone: a Bubble Tea based
-// MIDI monitor. It lists MIDI input ports, lets you open one, and scrolls
-// incoming events live. Keyboard only, no mouse, no config files yet.
+// Package ui implements the tuiper terminal UI: a Bubble Tea based monitor
+// for MIDI and audio devices. It lists MIDI input ports (open one and watch
+// events scroll by) and audio endpoints (device/channel dropdowns, capture
+// meter, monitor path). Keyboard only, no mouse, no config files yet.
 //
 // Structure notes (Elm architecture, as used by Bubble Tea):
 //
@@ -9,9 +10,9 @@
 //	Update() - (model, incoming message) -> (model, followup commands)
 //	View()  - render current state to a string
 //
-// The MIDI hardware details live in internal/midi; this package only knows
-// about ports, events, and its own state.
-package midimon
+// Driver details live in internal/midi and internal/audio; this package
+// only knows about ports/devices, events, and its own state.
+package ui
 
 import (
 	"fmt"

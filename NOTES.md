@@ -98,7 +98,7 @@ real-hardware MIDI testing and release binaries.
     cmd/tuiper/          entrypoint, flags, headless watch/audio modes
     internal/midi/       MIDI Engine (driver owner), Monitor (event stream)
     internal/audio/      audio Engine (miniaudio via malgo: Devices, capture, playback)
-    internal/midimon/    Milestone-1 TUI: model.go (state/logic), view.go (render),
+    internal/ui/         terminal UI: model.go (state/logic), view.go (render),
                          demo.go, audio_panel.go (device dropdowns/meter/monitor)
     tools/               zig cc CGO wrappers
     scripts/             container entrypoint + pipewire virtual rig config

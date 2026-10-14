@@ -22,7 +22,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"tuiper/internal/midi"
-	"tuiper/internal/midimon"
+	"tuiper/internal/ui"
 )
 
 func main() {
@@ -50,7 +50,7 @@ func main() {
 		os.Exit(code)
 	}
 
-	model := midimon.New(eng, *demo)
+	model := ui.New(eng, *demo)
 	program := tea.NewProgram(model,
 		tea.WithAltScreen(),
 	)
@@ -62,7 +62,7 @@ func main() {
 	}
 
 	// tear down the MIDI state owned by the final model, then the driver
-	if m, ok := final.(midimon.Model); ok {
+	if m, ok := final.(ui.Model); ok {
 		e := m.Shutdown()
 		_ = e.Close()
 	} else {
@@ -74,7 +74,7 @@ func main() {
 // given duration (a TUI-free smoke test and debugging tool).
 func runWatch(eng *midi.Engine, demo bool, d time.Duration) int {
 	if demo {
-		s := midimon.NewDemoSender(eng)
+		s := ui.NewDemoSender(eng)
 		s.Start()
 		defer func() {
 			<-s.Stop()
