@@ -93,17 +93,26 @@ Flags:
 
 ## TUI keys
 
-- `q` / `esc` / `ctrl+c` — quit
-- `↑`/`k`, `↓`/`j` — move selection
-- `enter` / `space` — open/close (`toggle`) the selected port
-- `r` — refresh the port list
+- `q` / `ctrl+c` — quit (`esc` first cancels an open audio dropdown)
+- `↑`/`k`, `↓`/`j` — move selection (inside an open dropdown: its entries)
+- `enter` / `space` — open/close the selected MIDI port, or confirm the open
+  audio dropdown
+- `i` / `o` / `c` — audio dropdowns: capture device, playback device,
+  channel count (stereo/mono). Selecting re-opens the streams.
+- `m` — toggle the monitor path (capture → playback). In the container the
+  rig makes this safe; on real hardware mic→speakers is a live feedback loop.
+- `r` — refresh lists (ports + audio devices)
+
+Audio captures start only after you pick a device; the `in` row shows a live
+peak meter (dBFS + frames/s) once capture runs.
 
 ## Project layout
 
     cmd/tuiper/          entrypoint, flags, headless watch/audio modes
     internal/midi/       MIDI Engine (driver owner), Monitor (event stream)
     internal/audio/      audio Engine over miniaudio (capture/playback/Devices)
-    internal/midimon/    Milestone-1 TUI: model.go (state/logic), view.go (render), demo.go
+    internal/midimon/    Milestone-1 TUI: model.go (state/logic), view.go (render),
+                         demo.go, audio_panel.go (device dropdowns/meter/monitor)
     tools/               zig cc CGO wrappers
     scripts/             container entrypoint (PipeWire rig) + its pipewire config
     build.ps1            Windows build script
@@ -113,12 +122,13 @@ Flags:
 ## Roadmap
 
 1. ✅ MIDI monitor (this milestone)
-2. ✅ Audio I/O headless core: enumeration, capture meter, capture→playback round trip (TUI wiring comes with the looper)
-3. Single-channel looper: record/overdub/play/stop/clear, tempo-synced edges
-4. MIDI pedal mapping (config file: device, note/CC -> action)
-5. Waveform display + position cursor on the TUI
-6. Multichannel/track stack, loop-in-loop
-7. Ableton Link clock sync (UDP protocol, Go binding or port)
-8. Release packaging (prebuilt binaries, `-engine rtmidi` embedding)
+2. ✅ Audio I/O headless core: enumeration, capture meter, capture→playback round trip
+3. 🚧 Device/channel selection in the TUI (audio dropdowns + meter, monitor path)
+4. Single-channel looper: record/overdub/play/stop/clear, tempo-synced edges
+5. MIDI pedal mapping (config file: device, note/CC -> action)
+6. Waveform display + position cursor on the TUI
+7. Multichannel/track stack, loop-in-loop
+8. Ableton Link clock sync (UDP protocol, Go binding or port)
+9. Release packaging (prebuilt binaries, `-engine rtmidi` embedding)
 
 See `NOTES.md` for build/packaging notes.

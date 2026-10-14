@@ -40,6 +40,8 @@ type Model struct {
 	demo    bool // -demo mode: synthetic events on the test engine
 	demoCtl *DemoSender
 
+	ap *audioPanel // audio device dropdowns / meter / monitor (always non-nil after New)
+
 	log     []string
 	events  uint64 // total received
 	clocks  uint64 // timing clock / tick, counted separately (often spammy)
@@ -60,6 +62,7 @@ func New(eng *midi.Engine, demo bool) Model {
 		eng:     eng,
 		monitor: midi.NewMonitor(eng),
 		demo:    demo,
+		ap:      newAudioPanel(),
 		openNum: -1,
 		status:  "ready",
 		height:  24,
@@ -77,6 +80,9 @@ func (m Model) Shutdown() *midi.Engine {
 	}
 	if m.monitor != nil {
 		m.monitor.Stop()
+	}
+	if m.ap != nil {
+		m.ap.shutdown()
 	}
 	return m.eng
 }
@@ -157,26 +163,73 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 
-		case "q", "esc", "ctrl+c":
+		case "q", "ctrl+c":
+			return m, tea.Quit
+
+		case "esc":
+			// esc first cancels an open dropdown, and only quits otherwise
+			if m.ap != nil && m.ap.focus != dropNone {
+				m.ap.focus = dropNone
+				return m, nil
+			}
 			return m, tea.Quit
 
 		case "up", "k":
+			if m.ap != nil && m.ap.focus != dropNone {
+				m.ap.moveCursor(-1)
+				return m, nil
+			}
 			if len(m.ports) > 0 {
 				m.cursor = (m.cursor - 1 + len(m.ports)) % len(m.ports)
 			}
 			return m, nil
 
 		case "down", "j":
+			if m.ap != nil && m.ap.focus != dropNone {
+				m.ap.moveCursor(1)
+				return m, nil
+			}
 			if len(m.ports) > 0 {
 				m.cursor = (m.cursor + 1) % len(m.ports)
 			}
 			return m, nil
 
 		case "enter", "space":
+			if m.ap != nil && m.ap.focus != dropNone {
+				changed := m.ap.pick()
+				if changed {
+					m.ap.prepareRestart()
+					return m, m.ap.restartCmd()
+				}
+				return m, nil
+			}
 			return m, m.togglePort()
 
+		case "i", "o", "c":
+			if m.ap == nil {
+				return m, nil
+			}
+			if m.ap.eng == nil {
+				m.fail("audio unavailable: %v", m.ap.initErr)
+				return m, nil
+			}
+			m.ap.toggleDropdown(map[string]int{"i": dropIn, "o": dropOut, "c": dropChan}[msg.String()])
+			if m.ap.ins == nil && m.ap.outs == nil {
+				// first audio interaction: enumerate in the background;
+				// the dropdown opens immediately and fills on arrival
+				return m, m.ap.listCmd()
+			}
+			return m, nil
+
+		case "m":
+			return m.toggleMonitor()
+
 		case "r":
-			return m, m.portsCmd()
+			cmds := []tea.Cmd{m.portsCmd()}
+			if m.ap != nil {
+				cmds = append(cmds, m.ap.listCmd())
+			}
+			return m, tea.Batch(cmds...)
 		}
 
 	case portsMsg:
@@ -219,6 +272,61 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case eventMsg:
 		return m.updateEvent(msg.Event)
+
+	// ---- audio panel -----------------------------------------------------
+
+	case audioListMsg:
+		if m.ap == nil {
+			return m, nil
+		}
+		m.ap.ins = msg.ins
+		m.ap.outs = msg.outs
+		// re-clamp stored selections against the new lists
+		if m.ap.inSel > len(msg.ins) {
+			m.ap.inSel = 0
+		}
+		if m.ap.outSel > len(msg.outs) {
+			m.ap.outSel = 0
+		}
+		m.ok("audio: %d capture / %d playback devices", len(msg.ins), len(msg.outs))
+		return m, nil
+
+	case audioErrMsg:
+		if m.ap == nil {
+			return m, nil
+		}
+		m.fail("audio: %v", msg.err)
+		return m, nil
+
+	case captureStartedMsg:
+		if m.ap == nil {
+			return m, nil
+		}
+		m.ap.capStream = msg.stream
+		m.ap.capturing = true
+		// the monitor gate opens fully only once playback is up too
+		m.ap.monOn.Store(m.ap.monitor && m.ap.playStream != nil)
+		m.ok("audio capture: %s (%d ch)", m.ap.inName(), m.ap.channels())
+		return m, meterTickCmd()
+
+	case playbackStartedMsg:
+		if m.ap == nil {
+			return m, nil
+		}
+		m.ap.playStream = msg.stream
+		m.ap.monOn.Store(m.ap.monitor)
+		m.ok("audio monitor: %s → %s", m.ap.inName(), m.ap.outName())
+		return m, nil
+
+	case audioMeterMsg:
+		if m.ap == nil {
+			return m, nil
+		}
+		m.ap.takeMeter()
+		if m.ap.capturing {
+			return m, meterTickCmd()
+		}
+		return m, nil
 	}
 
 	return m, nil
@@ -264,6 +372,33 @@ func (m Model) togglePort() tea.Cmd {
 		m.demoCtl = NewDemoSender(m.eng)
 	}
 	return openPortCmd(m.monitor, num)
+}
+
+// toggleMonitor switches the capture→playback monitor path. Turning it on
+// re-opens both ends (device consistency); turning it off stops playback only
+// so capture keeps metering.
+func (m Model) toggleMonitor() (tea.Model, tea.Cmd) {
+	if m.ap == nil {
+		return m, nil
+	}
+	if m.ap.eng == nil {
+		m.fail("audio unavailable: %v", m.ap.initErr)
+		return m, nil
+	}
+	m.ap.monitor = !m.ap.monitor
+	if m.ap.monitor {
+		m.ap.monOn.Store(false)
+		m.ap.prepareRestart()
+		m.ok("audio monitor on (beware feedback on real hardware)")
+		return m, m.ap.restartCmd()
+	}
+	if m.ap.playStream != nil {
+		m.ap.playStream.Stop()
+		m.ap.playStream = nil
+	}
+	m.ap.monOn.Store(false)
+	m.ok("audio: monitor off")
+	return m, nil
 }
 
 // ---- update helpers ---------------------------------------------------

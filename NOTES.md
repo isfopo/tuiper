@@ -68,14 +68,24 @@ real-hardware MIDI testing and release binaries.
   (arbitrary property update string) plus `PIPEWIRE_NODE` (target override);
   the entrypoint exports both so every ALSA plugin client (arecord, aplay,
   miniaudio) captures the null sink's monitor — a deterministic loopback.
+- **miniaudio explicit device IDs (audio.go)**: `ma_device_id` is a union
+  whose `alsa`/`pulse` members are plain strings at offset 0 (256 bytes).
+  Passing the ID back through `Options.DeviceID` must land in **C memory**:
+  a Go-managed buffer handed into `ma_device_init` trips the cgo pointer
+  checker ("Go pointer to unpinned buffer"), and letting `deviceConfig`
+  free its C copy too early (defer on its own return) leaves a dangling
+  pointer — ALSA then reports `Unknown PCM <garbage>` / MA_DOES_NOT_EXIST.
+  The ID allocation is therefore freed by the caller of
+  `malgo.InitDevice`.
 - daemon logs land in /tmp/pipewire.log and /tmp/wireplumber.log inside
   containers.
 
 ## Roadmap (rough order)
 
 1. x  MIDI monitor (this milestone)
-2. ~  Audio I/O: enumeration + capture meter + capture→playback round trip
-   done headless (-audio/-loopback); TUI wiring arrives with the looper.
+2. x  Audio I/O: enumeration + capture meter + capture→playback round trip
+   done headless (-audio/-loopback); TUI device dropdowns + meter + monitor
+   path wired into the monitor view ('i'/'o'/'c'/'m').
 3. Single-channel looper: record/overdub/play/stop/clear, tempo-synced edges
 4. MIDI pedal mapping (config file: device, note/CC -> action)
 5. Waveform display + position cursor on the TUI
@@ -88,6 +98,7 @@ real-hardware MIDI testing and release binaries.
     cmd/tuiper/          entrypoint, flags, headless watch/audio modes
     internal/midi/       MIDI Engine (driver owner), Monitor (event stream)
     internal/audio/      audio Engine (miniaudio via malgo: Devices, capture, playback)
-    internal/midimon/    Milestone-1 TUI: model.go (state/logic), view.go (render), demo.go
+    internal/midimon/    Milestone-1 TUI: model.go (state/logic), view.go (render),
+                         demo.go, audio_panel.go (device dropdowns/meter/monitor)
     tools/               zig cc CGO wrappers
     scripts/             container entrypoint + pipewire virtual rig config

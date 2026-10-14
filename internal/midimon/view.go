@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"tuiper/internal/audio"
 )
 
 // view styles. Kept deliberately plain: faint the chrome, bright the events.
@@ -51,7 +53,7 @@ func (m Model) View() string {
 	b.WriteString(headingStyle.Render("MIDI inputs (↑/↓ select, ⏎ open/close, r refresh)") + "\n")
 
 	if len(m.ports) == 0 {
-		b.WriteString("  " + okStyle.Render("(no input ports — connect your audio interface / pedal)"))
+		b.WriteString("  " + okStyle.Render("(no input ports — connect your audio interface / pedal)") + "\n")
 	} else {
 		for i, p := range m.ports {
 			cursor := "  "
@@ -67,6 +69,9 @@ func (m Model) View() string {
 			b.WriteString("  " + cursor + name + " " + state + "\n")
 		}
 	}
+
+	// audio panel ---------------------------------------------------------
+	m.audioView(&b)
 
 	// event log, bottom-anchored -----------------------------------------
 	logHeight := m.height - m.reserved()
@@ -95,10 +100,135 @@ func (m Model) View() string {
 	return b.String()
 }
 
-// reserved computes the number of lines taken by header/ports/status bar.
+// audioLinesOf counts the lines the audio panel occupies, matching exactly
+// what audioView renders — reserved must never drift from the drawn output
+// or the status bar slides around.
+func audioLinesOf(m Model) int {
+	if m.ap == nil {
+		return 0
+	}
+	if m.ap.eng == nil {
+		return 2 // heading + error line
+	}
+	n := 1 + 3 // heading + in/out/chan rows
+	if m.ap.focus != dropNone {
+		n += m.ap.dropdownCount() + 1 // options + controls hint
+	}
+	return n
+}
+
+// audioView renders the audio panel into b. Rows for device selection are
+// the dropdowns proper: pressing the key in front of a row expands the
+// option list right below it.
+func (m Model) audioView(b *strings.Builder) {
+	if m.ap == nil {
+		return
+	}
+	write := func(s string) { b.WriteString(s + "\n") }
+
+	heading := "audio"
+	if m.ap.eng == nil {
+		write(headingStyle.Render(heading))
+		write("  " + errStyle.Render("(unavailable: "+m.ap.initErr.Error()+")"))
+		return
+	}
+
+	write(headingStyle.Render(heading + " (i in • o out • c channels • m monitor)"))
+
+	// in row: selection + live meter
+	inRow := "  in : " + m.ap.inName() + "  " + meterBar(m.ap.dispPeak, m.ap.dispFrames, m.ap.dispDrops)
+	write(m.markRow(dropIn, inRow, m.ap.capturing))
+
+	outRow := "  out: " + m.ap.outName()
+	if m.ap.monitor {
+		outRow += "   [monitor → on]"
+	}
+	write(m.markRow(dropOut, outRow, m.ap.playStream != nil))
+
+	chanName := map[int]string{chanStereo: "stereo (2)", chanMono: "mono (1)"}[m.ap.chans]
+	write(m.markRow(dropChan, "  chan: "+chanName, false))
+
+	// expanded dropdown: the option list of the focused row
+	switch m.ap.focus {
+	case dropIn:
+		m.dropdownView(b, m.ap.inOptions(), m.ap.inSel)
+	case dropOut:
+		m.dropdownView(b, m.ap.outOptions(), m.ap.outSel)
+	case dropChan:
+		opts := make([]string, len(channelCounts))
+		for i, c := range channelCounts {
+			opts[i] = fmt.Sprintf("%d channels", c)
+		}
+		m.dropdownViewStrings(b, opts, m.ap.cursor)
+	default:
+		return
+	}
+	write(helpStyle.Render("  (↑/↓ j/k move • ⏎ select • esc cancel)"))
+}
+
+// markRow renders an audio row with its dropdown affordance and activity
+// mark. It highlights the row whose dropdown is currently open.
+func (m Model) markRow(dropdown int, row string, active bool) string {
+	name := row
+	if m.ap.focus == dropdown {
+		name = "  > " + selectedStyle.Render(strings.TrimPrefix(row, "  "))
+	} else if active {
+		name += " " + openMarkStyle.Render("•")
+	}
+	return name
+}
+
+// dropdownView renders the options of a device dropdown, cursor included.
+func (m Model) dropdownView(b *strings.Builder, opts []audio.Device, sel int) {
+	strs := make([]string, len(opts))
+	for i, o := range opts {
+		marker := ""
+		if i == sel {
+			marker = "[current] "
+		}
+		strs[i] = marker + o.String()
+	}
+	m.dropdownViewStrings(b, strs, m.ap.cursor)
+}
+
+func (m Model) dropdownViewStrings(b *strings.Builder, opts []string, cursor int) {
+	for i, o := range opts {
+		if i == cursor {
+			b.WriteString("    > " + selectedStyle.Render(o) + "\n")
+			continue
+		}
+		b.WriteString("      " + o + "\n")
+	}
+}
+
+// meterBar renders the capture level: a fixed-width bar plus dBFS text; the
+// frame rate doubles as proof that capture is actually delivering.
+func meterBar(peak int16, framesSince int64, drops uint64) string {
+	const width = 20
+	db := audio.ToDbFS(peak)
+	filled := 0
+	if db > -60 {
+		filled = int((db + 60) / 60 * width)
+		if filled > width {
+			filled = width
+		}
+	}
+	bar := strings.Repeat("#", filled) + strings.Repeat("-", width-filled)
+	rate := ""
+	if framesSince > 0 {
+		rate = fmt.Sprintf(" %4.1fkf/s", float64(framesSince)/1000/0.2)
+	}
+	dropTxt := ""
+	if drops > 0 {
+		dropTxt = errStyle.Render(fmt.Sprintf(" drops=%d", drops))
+	}
+	return okStyle.Render(fmt.Sprintf("[%s] %6.1fdBFS%s%s", bar, db, rate, dropTxt))
+}
+
+// reserved computes the number of lines taken by header/ports/audio/log.
 func (m Model) reserved() int {
 	lines := 2 + 1 + len(m.ports) + 2 + 1 // title block + port heading + ports + log heading + log
-	return lines
+	return audioLinesOf(m) + lines
 }
 
 func (m Model) statusBar() string {
@@ -115,13 +245,17 @@ func (m Model) statusBar() string {
 
 	b.WriteString(okStyle.Render(fmt.Sprintf("events=%d clocks=%d dropped=%d", m.events, m.clocks, m.dropped)))
 	b.WriteString("  ")
+	if m.ap != nil {
+		b.WriteString(m.ap.chip())
+	}
+	b.WriteString("  ")
 	if m.isErr {
 		b.WriteString(errStyle.Render(m.status))
 	} else {
 		b.WriteString(okStyle.Render(m.status))
 	}
 	b.WriteString("\n")
-	b.WriteString(helpStyle.Render("q quit • ↑/k, ↓/j move • enter/space open+close • r refresh • enter toggles"))
+	b.WriteString(helpStyle.Render("q quit • ↑/k, ↓/j move • enter/space open/select • i,o,c audio dropdowns • m monitor • r refresh • esc cancels dropdown"))
 	b.WriteString("\n")
 
 	return b.String()

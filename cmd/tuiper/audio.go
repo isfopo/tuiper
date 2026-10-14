@@ -5,7 +5,6 @@ package main
 
 import (
 	"fmt"
-	"math"
 	"os"
 	"sync/atomic"
 	"time"
@@ -76,7 +75,7 @@ func runAudio(d time.Duration, loopback bool) int {
 
 	cStream, err := eng.OpenCapture(audio.Options{}, func(in []int16) {
 		frames.Add(int64(len(in) / 2))
-		p := peakOf(in)
+		p := audio.Peak(in)
 		for {
 			old := peak.Load()
 			if int64(p) <= old || peak.CompareAndSwap(old, int64(p)) {
@@ -134,7 +133,7 @@ func runAudio(d time.Duration, loopback bool) int {
 	}
 
 	f, p := stats(frames, peak)
-	fmt.Printf("capture summary: %d frames, peak %.1f dBFS", f, dbFS(p))
+	fmt.Printf("capture summary: %d frames, peak %.1f dBFS", f, audio.ToDbFS(p))
 	if dd := dropped.Load(); dd > 0 {
 		fmt.Printf(", %d blocks dropped (playback slower than capture)", dd)
 	}
@@ -150,32 +149,10 @@ func stats(frames, peak *atomic.Int64) (int64, int16) {
 	return frames.Load(), int16(peak.Load())
 }
 
-func peakOf(s []int16) int16 {
-	var m int16
-	for _, v := range s {
-		if v < 0 {
-			v = -v
-		}
-		if v > m {
-			m = v
-		}
-	}
-	return m
-}
-
-// dbFS converts a raw sample magnitude to dB relative to full scale; zero
-// samples report -100 dB.
-func dbFS(peak int16) float64 {
-	if peak == 0 {
-		return -100
-	}
-	return 20 * math.Log10(float64(peak)/32768)
-}
-
 func printMeterBar(peak, frames *atomic.Int64) {
 	const width = 44
 	p := int16(peak.Load())
-	db := dbFS(p)
+	db := audio.ToDbFS(p)
 	filled := 0
 	if db > -100 {
 		filled = int((db + 60) / 60 * width) // -60..0 dB range maps to bar
