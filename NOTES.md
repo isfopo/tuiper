@@ -43,6 +43,19 @@ real-hardware MIDI testing and release binaries.
     .\tuiper.exe                       # TUI on real ports
     .\tuiper.exe -engine test -demo    # TUI on fake loopback + synthetic events
 
+## TUI gotchas
+
+- `Model.View()` must emit **exactly `m.height` \n-separated rows with no
+  trailing newline**. Bubbletea's standard renderer splits the frame on `\n`
+  and, when the split count exceeds the terminal height, drops rows **from
+  the top** to fit. A trailing `\n` adds one empty row, so the header line
+  (title + activity lamps) was silently erased in every terminal — it looked
+  like a Zed altscreen quirk but reproduced in tmux and Windows Terminal too.
+- Reproduce/verify UI rendering headlessly inside the dev container with
+  tmux (`apt-get install tmux` on demand): run the TUI in a detached
+  session, `send-keys` keys, then `capture-pane -p` (plain text) and
+  `pipe-pane` the raw output stream to a log for byte-level analysis.
+
 ## Packaging notes (kept in mind for later)
 
 - `tools/zigcc.cmd` / `tools/zigcxx.cmd` are the only nonstandard build

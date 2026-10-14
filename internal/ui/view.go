@@ -263,7 +263,10 @@ func (m Model) statusBar() string {
 	}
 	b.WriteString("\n")
 	b.WriteString(helpStyle.Render("q quit • ↑/k, ↓/j move • enter/space open/select • i,o,c audio dropdowns • m monitor • r refresh • esc cancels dropdown • ● midi in/out lamps top right"))
-	b.WriteString("\n")
 
+	// NOTE: no trailing newline. The frame must occupy exactly m.height
+	// \n-separated rows; a trailing "\n" adds an empty row that overflows
+	// the terminal and makes bubbletea's renderer drop rows from the TOP
+	// (which silently ate the header line and lamps in every terminal).
 	return b.String()
 }
