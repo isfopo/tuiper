@@ -1,11 +1,15 @@
 // Command tuiper is a looper built around a terminal user interface. It is
-// currently in milestone 1: a MIDI input monitor (see internal/midimon).
+// currently past milestone 1 (MIDI input monitor; -watch) and exercising
+// milestone 2 (audio device enumeration + capture meter + loopback round
+// trip; -audio).
 //
 // Usage:
 //
 //	tuiper                       real hardware ports (RtMidi via CGO)
 //	tuiper -engine test          fake loopback ports (no hardware needed)
 //	tuiper -engine test -demo    fake ports plus a synthetic event sender
+//	tuiper -audio 3s             headless audio device check
+//	tuiper -audio 3s -loopback   capture fed straight into playback
 package main
 
 import (
@@ -25,7 +29,14 @@ func main() {
 	engineName := flag.String("engine", "rtmidi", "midi driver: rtmidi | test")
 	demo := flag.Bool("demo", false, "inject synthetic events (engine test only)")
 	watch := flag.Duration("watch", 0, "headless mode: print events for the given duration")
+	audioDur := flag.Duration("audio", 0, "headless audio check: enumerate devices and meter capture (milestone 2)")
+	loopback := flag.Bool("loopback", false, "play captured audio back out (-audio mode; feedback risk on real hardware!)")
 	flag.Parse()
+
+	if *audioDur > 0 {
+		// milestone 2 check: no MIDI engine needed at all
+		os.Exit(runAudio(*audioDur, *loopback))
+	}
 
 	eng, err := newEngine(*engineName)
 	if err != nil {

@@ -3,7 +3,7 @@
 A looper with a terminal UI (Bubble Tea), intended to run against a DAW
 (Ableton) via Ableton Link and MIDI.
 
-## Current status — Milestone 1: MIDI monitor
+## Current status — Milestone 2: audio I/O (in progress), milestone 1 done
 
 - Bubble Tea MIDI monitor: port list, open/close, live event log.
 - Engines:
@@ -11,6 +11,16 @@ A looper with a terminal UI (Bubble Tea), intended to run against a DAW
   - `test`: fake loopback ports via gomidi `testdrv`, no CGO in the path.
 - `-demo`: synthetic event sender on the test engine.
 - `-watch 5s`: headless event printing (smoke test / debugging).
+- `-audio 5s`: headless audio check over miniaudio (via malgo CGO):
+  enumerates devices, meters default capture (peak dBFS). Space backend
+  order: WASAPI (Win), ALSA-first (Linux). `-loopback` feeds capture into
+  playback for round-trip tests (in containers the pipewire null sink +
+  monitor routing make this a safe, deterministic loop).
+- Container audio: each run starts a private PipeWire session (+WirePlumber,
+  D-Bus); a null sink becomes the default playback target and capture uses
+  its monitor via the `PIPEWIRE_NODE`/`stream.capture.sink` route below.
+  WirePlumber 0.4 needs the Debian workaround and the container needs the
+  virtual rig config (see scripts/).
 
 ## Build (Windows)
 
@@ -42,10 +52,30 @@ real-hardware MIDI testing and release binaries.
   eventually.
 - The `test` engine proves a workflow with no hardware/toolchain lock-in.
 
+## Container audio internals (gotchas, for future maintenance)
+
+- **WirePlumber without systemd-logind**: Debian's build aborts on start
+  (Debian bug #1019404); the entrypoint writes
+  `["with-logind"] = false` into bluetooth.lua.d/50-bluez-config.lua.
+- **No devices appear without a session manager**: PipeWire alone ships no
+  default sink; WirePlumber only creates nodes for real ALSA cards (none in
+  a container), hence the null sink in scripts/pipewire/tuiper-audio.conf.
+- **Capture-routing (PipeWire 0.3.65 + WirePlumber 0.4.13)**: a capture
+  stream's explicit `target.object`/`node.target` pointing at a *sink* is
+  ignored unless the stream also has `stream.capture.sink = true`
+  (policy-node.lua routes it to the default source otherwise). The
+  alsa-pipewire plugin accepts pipe-wide props via `PIPEWIRE_ALSA` env
+  (arbitrary property update string) plus `PIPEWIRE_NODE` (target override);
+  the entrypoint exports both so every ALSA plugin client (arecord, aplay,
+  miniaudio) captures the null sink's monitor — a deterministic loopback.
+- daemon logs land in /tmp/pipewire.log and /tmp/wireplumber.log inside
+  containers.
+
 ## Roadmap (rough order)
 
 1. x  MIDI monitor (this milestone)
-2. Audio I/O: device enumeration, in/out streams, capture playback round trip
+2. ~  Audio I/O: enumeration + capture meter + capture→playback round trip
+   done headless (-audio/-loopback); TUI wiring arrives with the looper.
 3. Single-channel looper: record/overdub/play/stop/clear, tempo-synced edges
 4. MIDI pedal mapping (config file: device, note/CC -> action)
 5. Waveform display + position cursor on the TUI
@@ -55,7 +85,9 @@ real-hardware MIDI testing and release binaries.
 
 ## Layout
 
-    cmd/tuiper/          entrypoint, flags
-    internal/midi/       Engine (driver owner), Monitor (event stream)
+    cmd/tuiper/          entrypoint, flags, headless watch/audio modes
+    internal/midi/       MIDI Engine (driver owner), Monitor (event stream)
+    internal/audio/      audio Engine (miniaudio via malgo: Devices, capture, playback)
     internal/midimon/    Milestone-1 TUI: model.go (state/logic), view.go (render), demo.go
     tools/               zig cc CGO wrappers
+    scripts/             container entrypoint + pipewire virtual rig config
