@@ -106,9 +106,9 @@ Flags:
 Audio captures start only after you pick a device; the `in` row shows a live
 peak meter (dBFS + frames/s) once capture runs.
 
-The header carries two activity dots top right: `●` green blinks when MIDI
-input traffic arrives, `●` magenta blinks on outgoing MIDI (`-demo` sends
-patterns through the loopback). They stay dark when idle.
+Incoming events are not scrolled as a log anymore (the `-watch` headless
+mode still prints events); in the TUI traffic shows as the counters in the
+status line (`events=… clocks=…`) plus the header activity dots.
 
 ## Project layout
 

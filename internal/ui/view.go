@@ -27,8 +27,6 @@ var (
 	openMarkStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("42"))
 
-	eventStyle = lipgloss.NewStyle()
-
 	errStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("196")).
 			Bold(true)
@@ -80,25 +78,8 @@ func (m Model) View() string {
 	// audio panel ---------------------------------------------------------
 	m.audioView(&b)
 
-	// event log, bottom-anchored -----------------------------------------
-	logHeight := m.height - m.reserved()
-	if logHeight < 1 {
-		logHeight = 1
-	}
-
-	b.WriteString("\n" + headingStyle.Render("events (last 512)") + "\n")
-
-	log := m.log
-	if len(log) > logHeight {
-		log = log[len(log)-logHeight:]
-	}
-	for _, line := range log {
-		b.WriteString(eventStyle.Render(line) + "\n")
-	}
-
 	// fill the remainder so the status bar stays on the bottom row
-	bodyLines := len(log)
-	padding := logHeight - bodyLines
+	padding := m.height - m.reserved()
 	if padding > 0 {
 		b.WriteString(strings.Repeat("\n", padding))
 	}
@@ -233,25 +214,26 @@ func meterBar(peak int16, framesSince int64, drops uint64) string {
 }
 
 // lampView renders the two MIDI activity dots, right-aligned by the caller:
-// green in / magenta out, dark (faint hollow circles) when idle, bright
-// (bold, filled) inside their blink window after traffic.
+// dark = faint hollow circle (idle), lit = bold filled dot in its color for
+// a short window after traffic (in green, out magenta).
 func (m Model) lampView() string {
 	if m.lamps == nil {
 		return ""
 	}
-	lamp := func(stamp *atomic.Int64, onColor string) string {
+	dot := lipgloss.NewStyle().Faint(true).Render("○")
+	lit := func(stamp *atomic.Int64, onColor string) string {
 		if m.lamps.lit(stamp) {
 			return lipgloss.NewStyle().Foreground(lipgloss.Color(onColor)).Bold(true).Render("●")
 		}
-		return lipgloss.NewStyle().Faint(true).Render("●")
+		return dot
 	}
-	return " " + lamp(&m.lamps.in, "42") + " " + lamp(&m.lamps.out, "205")
+	return " " + lit(&m.lamps.in, "42") + " " + lit(&m.lamps.out, "205")
 }
 
-// reserved computes the number of lines taken by header/ports/audio/log.
+// reserved computes the number of lines occupied above the status bar:
+// title block + midi heading + ports + audio panel + status bar (2 lines).
 func (m Model) reserved() int {
-	lines := 2 + 1 + len(m.ports) + 2 + 1 // title block + port heading + ports + log heading + log
-	return audioLinesOf(m) + lines
+	return 2 + 1 + len(m.ports) + audioLinesOf(m) + 2
 }
 
 func (m Model) statusBar() string {

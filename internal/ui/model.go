@@ -54,13 +54,8 @@ type lampOffMsg struct{}
 // newLamps anchors the lamp state so it survives Model value copies.
 func newLamps() *lamps { return &lamps{} }
 
-// logCap is the maximum number of retained event lines. When long running,
-// older lines are simply replaced (simple sliding window; a proper scroll
-// buffer comes with the looper session view).
-const logCap = 512
-
 // blinkWindow is how long a lamp stays lit after observed MIDI traffic.
-const blinkWindow = 150 * time.Millisecond
+const blinkWindow = 250 * time.Millisecond
 
 // Model holds all state of the monitor.
 type Model struct {
@@ -83,7 +78,6 @@ type Model struct {
 	// vs. dark from the elapsed time since the stamp.
 	lamps *lamps
 
-	log     []string
 	events  uint64 // total received
 	clocks  uint64 // timing clock / tick, counted separately (often spammy)
 	dropped uint64 // dropped by the monitor buffer
@@ -387,8 +381,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// updateEvent appends a formatted event, keeps the subscription alive, and
-// lights the in-lamp.
+// updateEvent keeps the counters fresh, keeps the subscription alive, and
+// lights the in-lamp. (A scrolling event log used to live here; traffic now
+// shows as counters plus the activity lamps instead.)
 func (m Model) updateEvent(ev midi.Event) (tea.Model, tea.Cmd) {
 	m.events++
 	if m.lamps != nil {
@@ -400,10 +395,6 @@ func (m Model) updateEvent(ev midi.Event) (tea.Model, tea.Cmd) {
 	if line == "TimingClock" {
 		m.clocks++
 		return m, m.lamps.withLampOff(waitForEventCmd(m.monitor.Events()))
-	}
-	m.log = append(m.log, line)
-	if len(m.log) > logCap {
-		m.log = m.log[len(m.log)-logCap:]
 	}
 	m.dropped = m.monitor.Dropped()
 	return m, m.lamps.withLampOff(waitForEventCmd(m.monitor.Events()))
