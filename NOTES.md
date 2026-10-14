@@ -109,6 +109,7 @@ real-hardware MIDI testing and release binaries.
 ## Layout
 
     cmd/tuiper/          entrypoint, flags, headless watch/audio modes
+    internal/looper/     loop engine: state machine + s16 buffer math (TUI-agnostic)
     internal/midi/       MIDI Engine (driver owner), Monitor (event stream)
     internal/audio/      audio Engine (miniaudio via malgo: Devices, capture, playback)
     internal/ui/         terminal UI: model.go (state/logic), view.go (render),
