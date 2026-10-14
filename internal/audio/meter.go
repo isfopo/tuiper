@@ -3,12 +3,17 @@ package audio
 
 import "math"
 
-// Peak returns the largest absolute sample magnitude in s.
+// Peak returns the largest absolute sample magnitude in s. A full-scale
+// negative sample (-32768) is saturated to 32767 instead of overflowing back
+// to a negative value (which would report silence for a maximal signal).
 func Peak(s []int16) int16 {
 	var m int16
 	for _, v := range s {
 		if v < 0 {
 			v = -v
+			if v < 0 { // -32768: negate overflows; saturate
+				v = math.MaxInt16
+			}
 		}
 		if v > m {
 			m = v
