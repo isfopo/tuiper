@@ -68,6 +68,9 @@ type Options struct {
 	// DeviceID opens a specific endpoint (copy the []byte out of Device).
 	// nil uses the system default device.
 	DeviceID []byte
+	// PlayDeviceID overrides the playback endpoint of a duplex stream; nil
+	// plays on the same endpoint as DeviceID (or the system default).
+	PlayDeviceID []byte
 	// Channels: 1 or 2 (default 2).
 	Channels uint32
 	// SampleRate (default 48000).
@@ -296,12 +299,95 @@ func (e *Engine) OpenPlayback(opts Options, pull func(n int) []int16) (*Stream, 
 	return &Stream{dev: dev}, nil
 }
 
+// OpenDuplex starts one full-duplex device: capture and playback are served
+// by the same callback. That shared callback is what a looper needs to
+// record and overdub against its own playback without cross-device clock
+// drift. handle receives the output buffer (fill it: short results stay
+// silent) together with the input just captured; either side can be nil on
+// atypical backends, so guard both. The buffers alias engine-owned
+// memory and are only valid for the duration of handle.
+func (e *Engine) OpenDuplex(opts Options, handle func(out, in []int16)) (*Stream, error) {
+	if err := e.checkInit(); err != nil {
+		return nil, err
+	}
+
+	ch := opts.channels()
+	cfg := malgo.DefaultDeviceConfig(malgo.Duplex)
+	cfg.SampleRate = opts.rate()
+	cfg.PeriodSizeInMilliseconds = opts.latencyMS()
+	cfg.Periods = 3
+	cfg.Capture.Format = malgo.FormatS16
+	cfg.Capture.Channels = ch
+	cfg.Playback.Format = malgo.FormatS16
+	cfg.Playback.Channels = ch
+
+	inID := opts.DeviceID       // nil keeps the system default
+	playID := opts.PlayDeviceID // nil plays on the capture endpoint
+	if len(playID) == 0 && len(inID) != 0 {
+		playID = inID
+	}
+	cIn := cDeviceID(inID)
+	cPlay := cDeviceID(playID)
+	defer func() { // freed here: InitDevice copied both synchronously
+		if cIn != nil {
+			C.free(cIn)
+		}
+		if cPlay != nil {
+			C.free(cPlay)
+		}
+	}()
+	if cIn != nil {
+		cfg.Capture.DeviceID = cIn
+	}
+	if cPlay != nil {
+		cfg.Playback.DeviceID = cPlay
+	}
+
+	dev, err := malgo.InitDevice(e.ctx.Context, cfg, malgo.DeviceCallbacks{
+		Data: func(output, input []byte, frameCount uint32) {
+			var out, in []int16
+			if output != nil {
+				out = samplesOf(output)
+			}
+			if input != nil {
+				in = samplesOf(input)
+			}
+			if out != nil || in != nil { // one shared callback per period
+				handle(out, in)
+			}
+		},
+	})
+	if err != nil {
+		dev.Uninit()
+		return nil, fmt.Errorf("open duplex: %w", err)
+	}
+	if err := dev.Start(); err != nil {
+		dev.Uninit()
+		return nil, fmt.Errorf("start duplex: %w", err)
+	}
+	return &Stream{dev: dev}, nil
+}
+
+// cDeviceID copies a device ID into C memory (cgo forbids handing over a
+// Go-managed buffer; miniaudio copies the ID synchronously inside
+// InitDevice). The returned pointer must be freed once InitDevice returned;
+// an empty id yields nil (the system default).
+func cDeviceID(id []byte) unsafe.Pointer {
+	if len(id) == 0 {
+		return nil
+	}
+	c := C.malloc(C.size_t(len(id)))
+	if c == nil {
+		return nil
+	}
+	C.memcpy(c, unsafe.Pointer(&id[0]), C.size_t(len(id)))
+	return c
+}
+
 // deviceConfig builds a malgo config for one s16 stream. A specific device
-// gets its ID copied into C memory (cgo forbids handing over a Go-managed
-// buffer; miniaudio copies the ID synchronously inside InitDevice). The C
-// pointer is returned to the caller, which must keep it alive across
-// malgo.InitDevice and then C.free it — passing a nil cDevID keeps the
-// system default.
+// gets its ID copied into C memory and the pointer is returned to the
+// caller, which must keep it alive across malgo.InitDevice and then C.free
+// it — passing a nil cDevID keeps the system default.
 func deviceConfig(kind malgo.DeviceType, opts Options) (malgo.DeviceConfig, unsafe.Pointer, error) {
 	cfg := malgo.DefaultDeviceConfig(kind)
 	cfg.SampleRate = opts.rate()
@@ -316,14 +402,13 @@ func deviceConfig(kind malgo.DeviceType, opts Options) (malgo.DeviceConfig, unsa
 		cfg.Playback.Channels = opts.channels()
 	}
 
-	if len(opts.DeviceID) == 0 {
+	c := cDeviceID(opts.DeviceID)
+	if c == nil {
+		if len(opts.DeviceID) > 0 {
+			return cfg, nil, fmt.Errorf("alloc device id (%d bytes) failed", len(opts.DeviceID))
+		}
 		return cfg, nil, nil
 	}
-	c := C.malloc(C.size_t(len(opts.DeviceID)))
-	if c == nil {
-		return cfg, nil, fmt.Errorf("alloc device id (%d bytes) failed", len(opts.DeviceID))
-	}
-	C.memcpy(c, unsafe.Pointer(&opts.DeviceID[0]), C.size_t(len(opts.DeviceID)))
 	if kind == malgo.Capture {
 		cfg.Capture.DeviceID = c
 	} else {
