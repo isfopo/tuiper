@@ -9,15 +9,14 @@ import (
 	engmidi "tuiper/internal/midi"
 )
 
-// DemoSender injects synthetic MIDI events through a loopback (engine out
-// port -> engine in port) so the monitor can be exercised without hardware.
-// It only works with a testdrv based engine (-engine test).
 type DemoSender struct {
 	eng      *engmidi.Engine
 	outPort  int
 	stopOnce sync.Once
 	stop     chan struct{}
 	done     chan struct{}
+
+	onSend func() // optional activity hook, called best-effort before each Send
 }
 
 // NewDemoSender creates the synthetic event sender for a test engine.
@@ -28,6 +27,12 @@ func NewDemoSender(eng *engmidi.Engine) *DemoSender {
 		stop:    make(chan struct{}),
 		done:    make(chan struct{}),
 	}
+}
+
+// OnSend installs a hook invoked just before every injected event (intended
+// for the TUI activity indicator: sent events blink the "out" lamp).
+func (d *DemoSender) OnSend(f func()) {
+	d.onSend = f
 }
 
 // Start runs the demo loop in the background. Non-blocking.
@@ -61,6 +66,9 @@ func (d *DemoSender) run() {
 	}
 
 	send := func(msg gomidi.Message) {
+		if d.onSend != nil {
+			d.onSend()
+		}
 		_ = out.Send(msg) // best effort; demo port errors are not fatal
 	}
 

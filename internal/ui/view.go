@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -45,12 +46,18 @@ func (m Model) View() string {
 	// header -----------------------------------------------------------
 	if m.width > 0 {
 		title := titleStyle.Render("◉ tuiper")
-		sub := headingStyle.Render("midi monitor — v0.1")
-		b.WriteString(title + sub + "\n\n")
+		sub := headingStyle.Render("midi + audio monitor")
+		left := title + sub
+		lamps := m.lampView()
+		gap := m.width - lipgloss.Width(left) - lipgloss.Width(lamps)
+		if gap < 1 {
+			gap = 1
+		}
+		b.WriteString(left + strings.Repeat(" ", gap) + lamps + "\n\n")
 	}
 
 	// ports --------------------------------------------------------------
-	b.WriteString(headingStyle.Render("MIDI inputs (↑/↓ select, ⏎ open/close, r refresh)") + "\n")
+	b.WriteString(headingStyle.Render("midi (↑/↓ select, ⏎ open/close, r refresh)") + "\n")
 
 	if len(m.ports) == 0 {
 		b.WriteString("  " + okStyle.Render("(no input ports — connect your audio interface / pedal)") + "\n")
@@ -225,6 +232,22 @@ func meterBar(peak int16, framesSince int64, drops uint64) string {
 	return okStyle.Render(fmt.Sprintf("[%s] %6.1fdBFS%s%s", bar, db, rate, dropTxt))
 }
 
+// lampView renders the two MIDI activity dots, right-aligned by the caller:
+// green in / magenta out, dark (faint hollow circles) when idle, bright
+// (bold, filled) inside their blink window after traffic.
+func (m Model) lampView() string {
+	if m.lamps == nil {
+		return ""
+	}
+	lamp := func(stamp *atomic.Int64, onColor string) string {
+		if m.lamps.lit(stamp) {
+			return lipgloss.NewStyle().Foreground(lipgloss.Color(onColor)).Bold(true).Render("●")
+		}
+		return lipgloss.NewStyle().Faint(true).Render("●")
+	}
+	return " " + lamp(&m.lamps.in, "42") + " " + lamp(&m.lamps.out, "205")
+}
+
 // reserved computes the number of lines taken by header/ports/audio/log.
 func (m Model) reserved() int {
 	lines := 2 + 1 + len(m.ports) + 2 + 1 // title block + port heading + ports + log heading + log
@@ -255,7 +278,7 @@ func (m Model) statusBar() string {
 		b.WriteString(okStyle.Render(m.status))
 	}
 	b.WriteString("\n")
-	b.WriteString(helpStyle.Render("q quit • ↑/k, ↓/j move • enter/space open/select • i,o,c audio dropdowns • m monitor • r refresh • esc cancels dropdown"))
+	b.WriteString(helpStyle.Render("q quit • ↑/k, ↓/j move • enter/space open/select • i,o,c audio dropdowns • m monitor • r refresh • esc cancels dropdown • ● midi in/out lamps top right"))
 	b.WriteString("\n")
 
 	return b.String()
