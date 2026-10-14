@@ -20,6 +20,7 @@
 package ui
 
 import (
+	"fmt"
 	"sync/atomic"
 	"time"
 
@@ -27,6 +28,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"tuiper/internal/audio"
+	"tuiper/internal/looper"
 )
 
 // dropdown subjects
@@ -79,6 +81,15 @@ type audioPanel struct {
 	buf        chan []int16
 	drops      atomic.Int64
 	playStream *audio.Stream
+
+	// looper (milestone 3): while attached it owns ONE duplex stream built
+	// from the same device selections; the simplex capture/monitor path is
+	// stopped for the duration (shared endpoints, no double streams).
+	// looping is only touched on the Update thread. The loop content
+	// survives device changes and monitor toggles; 'x' (Clear) empties it.
+	loop       *looper.Looper
+	looping    bool
+	loopStream *audio.Stream
 }
 
 // newAudioPanel initializes the engine eagerly (like the MIDI monitor is
@@ -160,6 +171,11 @@ type playbackStartedMsg struct {
 
 type audioMeterMsg struct{}
 
+// loopStartedMsg adopts a freshly opened looper duplex stream.
+type loopStartedMsg struct {
+	stream *audio.Stream
+}
+
 // ---- commands ---------------------------------------------------------
 
 // listCmd enumerates capture/playback devices (async: WASAPI/ALSA
@@ -231,6 +247,82 @@ func (ap *audioPanel) restartCmd() tea.Cmd {
 	return tea.Batch(captureCmd, playbackCmd)
 }
 
+// ---- looper -----------------------------------------------------------
+
+// looperRestartCmd opens the duplex stream the looper runs on, using the
+// current device selections (in the same seq-token pattern as restartCmd:
+// a newer restart invalidates in-flight opens). prepareRestart must have
+// stopped every other stream first — shared endpoints stay single-tenant.
+func (ap *audioPanel) looperRestartCmd() tea.Cmd {
+	if ap.eng == nil {
+		return nil
+	}
+	seq := ap.seq.Add(1)
+	opts := audio.Options{
+		DeviceID:     deviceIDFor(ap.inOptions(), ap.inSel),
+		PlayDeviceID: deviceIDFor(ap.outOptions(), ap.outSel),
+		Channels:     ap.channels(),
+	}
+	return func() tea.Msg {
+		stream, err := ap.eng.OpenDuplex(opts, ap.loopHandle)
+		if err != nil {
+			return audioErrMsg{fmt.Errorf("looper: %w", err)}
+		}
+		if ap.seq.Load() != seq { // a newer restart won: abort
+			stream.Stop()
+			return nil
+		}
+		return loopStartedMsg{stream: stream}
+	}
+}
+
+// restartAfterChange re-opens whatever the panel was running before a
+// device/channel change: the looper's duplex stream stays the owner.
+func (ap *audioPanel) restartAfterChange() tea.Cmd {
+	if ap.looping {
+		return ap.looperRestartCmd()
+	}
+	return ap.restartCmd()
+}
+
+// loopHandle is the duplex callback (audio thread): playback follows the
+// looper, capture feeds it and the meter pass-through. Playback aliases the
+// looper's scratch buffer, so the copy into the device buffer is required.
+func (ap *audioPanel) loopHandle(out, in []int16) {
+	if out != nil {
+		if data := ap.loop.Playback(len(out)); data != nil {
+			copy(out, data)
+		}
+	}
+	if in != nil {
+		ap.loop.Capture(in)
+	}
+}
+
+// stopSimplex halts the panel's capture/monitor streams (the looper takes
+// over the endpoints; meter numbers come from the looper's pass-through).
+func (ap *audioPanel) stopSimplex() {
+	if ap.capStream != nil {
+		ap.capStream.Stop()
+		ap.capStream = nil
+	}
+	if ap.playStream != nil {
+		ap.playStream.Stop()
+		ap.playStream = nil
+	}
+	ap.monOn.Store(false)
+	ap.capturing = false
+	ap.drainBuf()
+}
+
+// metering reports whether a live meter exists (simplex capture or looper).
+func (ap *audioPanel) metering() bool {
+	if ap.capturing {
+		return true
+	}
+	return ap.looping && ap.loopStream != nil
+}
+
 // ---- audio thread side -------------------------------------------------
 
 // deliver is the capture callback: meters the block, and forwards a copy to
@@ -278,6 +370,10 @@ func (ap *audioPanel) shutdown() {
 		ap.playStream.Stop()
 		ap.playStream = nil
 	}
+	if ap.loopStream != nil {
+		ap.loopStream.Stop()
+		ap.loopStream = nil
+	}
 	ap.monOn.Store(false)
 	if ap.eng != nil {
 		ap.eng.Close()
@@ -286,8 +382,12 @@ func (ap *audioPanel) shutdown() {
 
 // chip renders the compact audio state for the status bar.
 func (ap *audioPanel) chip() string {
+	live := ap.capturing
 	state, color := "audio:off", "250"
 	switch {
+	case ap.looping && ap.loopStream != nil:
+		state, color = "audio:loop", "205"
+		live = ap.loop != nil && ap.loop.State() != looper.Idle
 	case ap.monitor && ap.playStream != nil:
 		state, color = "audio:monitor", "213"
 	case ap.capturing:
@@ -297,14 +397,16 @@ func (ap *audioPanel) chip() string {
 	}
 	return lipgloss.NewStyle().
 		Foreground(lipgloss.Color(color)).
-		Bold(ap.capturing).
+		Bold(live).
 		Render("[" + state + "]")
 }
 
 // ---- dropdown state helpers -------------------------------------------
 
 // prepareRestart stops running streams and flushes the monitor buffer so
-// restartCmd comes after a clean slate.
+// restartCmd comes after a clean slate. The looper's stream is stopped with
+// everything else; restartAfterChange re-opens it attached (loop content
+// survives: only the *audio.Stream* churns).
 func (ap *audioPanel) prepareRestart() {
 	if ap.capStream != nil {
 		ap.capStream.Stop()
@@ -313,6 +415,10 @@ func (ap *audioPanel) prepareRestart() {
 	if ap.playStream != nil {
 		ap.playStream.Stop()
 		ap.playStream = nil
+	}
+	if ap.loopStream != nil {
+		ap.loopStream.Stop()
+		ap.loopStream = nil
 	}
 	ap.monOn.Store(false)
 	ap.drainBuf()
@@ -395,8 +501,14 @@ func (ap *audioPanel) pick() bool {
 }
 
 // takeMeter snapshots the metering window into the plain display fields that
-// View reads (Update runs between renders, so this stays race-free).
+// View reads (Update runs between renders, so this stays race-free). While
+// the looper owns capture, its pass-through is the source instead.
 func (ap *audioPanel) takeMeter() {
+	if ap.looping && ap.loop != nil {
+		ap.dispPeak, ap.dispFrames = ap.loop.TakeMeter()
+		ap.dispDrops = 0
+		return
+	}
 	ap.dispPeak = int16(ap.winPeak.Swap(0))
 	ap.dispFrames = ap.winFrames.Swap(0)
 	ap.dispDrops = uint64(ap.drops.Load())

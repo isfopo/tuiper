@@ -3,9 +3,10 @@
 A looper with a terminal UI (Bubble Tea), intended to run against a DAW
 (Ableton) via Ableton Link and MIDI.
 
-## Current status — Milestone 2: audio I/O (in progress), milestone 1 done
+## Current status — Milestone 3: single-channel looper done [core], 1-2 done
 
-- Bubble Tea MIDI monitor: port list, open/close, live event log.
+- Bubble Tea MIDI monitor: port list, open/close; traffic as counters +
+  header activity lamps (the event log went away in favor of those).
 - Engines:
   - `rtmidi` (default): real ports via RtMidi/CGO (WinMM/CoreMIDI/ALSA).
   - `test`: fake loopback ports via gomidi `testdrv`, no CGO in the path.
@@ -16,6 +17,18 @@ A looper with a terminal UI (Bubble Tea), intended to run against a DAW
   order: WASAPI (Win), ALSA-first (Linux). `-loopback` feeds capture into
   playback for round-trip tests (in containers the pipewire null sink +
   monitor routing make this a safe, deterministic loop).
+- `-loop 2s`: headless looper round-trip check (milestone 3): duplex stream
+  records a synthesized 480 Hz tone (exact 100-frame period at 48 kHz), the
+  take closes at the deadline, the loop plays back, and the recorded level
+  is verified (-50 dBFS floor).
+- Looper internals: `internal/looper` is pure buffer math + a state machine
+  (idle/rec/play/overdub) with atomics; one preallocated 30 s s16 buffer
+  (5.8 MB stereo). The TUI attaches it via ONE full-duplex stream
+  (`audio.OpenDuplex`) built from the audio panel's device selections — the
+  shared callback keeps capture and playback sample-aligned, so overdubs
+  land where the loop reads. `l` attach/cycle, `x` clear; a channel change
+  re-creates the looper (loop lost, status says so). The panel keeps meter
+  duty by reading the looper's peak/window pass-through (`TakeMeter`).
 - Container audio: each run starts a private PipeWire session (+WirePlumber,
   D-Bus); a null sink becomes the default playback target and capture uses
   its monitor via the `PIPEWIRE_NODE`/`stream.capture.sink` route below.
@@ -99,7 +112,9 @@ real-hardware MIDI testing and release binaries.
 2. x  Audio I/O: enumeration + capture meter + capture→playback round trip
    done headless (-audio/-loopback); TUI device dropdowns + meter + monitor
    path wired into the monitor view ('i'/'o'/'c'/'m').
-3. Single-channel looper: record/overdub/play/stop/clear, tempo-synced edges
+3. x  Single-channel looper [core]: record/overdub/play/clear on one duplex
+   stream (internal/looper state machine, TUI keys l/x, headless -loop round
+   trip). Tempo-synced edges deferred to milestone 7 (Ableton Link).
 4. MIDI pedal mapping (config file: device, note/CC -> action)
 5. Waveform display + position cursor on the TUI
 6. Multichannel/track stack, loop-in-loop
@@ -108,11 +123,11 @@ real-hardware MIDI testing and release binaries.
 
 ## Layout
 
-    cmd/tuiper/          entrypoint, flags, headless watch/audio modes
+    cmd/tuiper/          entrypoint, flags, headless watch/audio/loop modes
     internal/looper/     loop engine: state machine + s16 buffer math (TUI-agnostic)
     internal/midi/       MIDI Engine (driver owner), Monitor (event stream)
-    internal/audio/      audio Engine (miniaudio via malgo: Devices, capture, playback)
+    internal/audio/      audio Engine (miniaudio via malgo: Devices, capture, playback, duplex)
     internal/ui/         terminal UI: model.go (state/logic), view.go (render),
-                         demo.go, audio_panel.go (device dropdowns/meter/monitor)
+                         demo.go, audio_panel.go (device dropdowns/meter/monitor/looper)
     tools/               zig cc CGO wrappers
     scripts/             container entrypoint + pipewire virtual rig config

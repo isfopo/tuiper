@@ -21,6 +21,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"tuiper/internal/looper"
 	"tuiper/internal/midi"
 )
 
@@ -56,6 +57,13 @@ func newLamps() *lamps { return &lamps{} }
 
 // blinkWindow is how long a lamp stays lit after observed MIDI traffic.
 const blinkWindow = 250 * time.Millisecond
+
+// Looper defaults: buffer format follows the attached duplex stream; the
+// capacity ceiling silently auto-closes long takes.
+const (
+	loopSampleRate = 48000 // audio.Options' default rate
+	loopMaxSeconds = 30.0  // ≈5.8 MB of s16 stereo
+)
 
 // Model holds all state of the monitor.
 type Model struct {
@@ -239,10 +247,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "enter", "space":
 			if m.ap != nil && m.ap.focus != dropNone {
+				which := m.ap.focus
 				changed := m.ap.pick()
 				if changed {
+					if which == dropChan && m.ap.looping {
+						// the loop buffer's channel layout is fixed at
+						// attach time; a change re-creates it (loop lost,
+						// and the status line says so)
+						m.ap.loop = looper.New(int(m.ap.channels()),
+							loopSampleRate, loopMaxSeconds)
+						m.ok("looper re-created (%d ch; loop cleared)",
+							int(m.ap.channels()))
+					}
 					m.ap.prepareRestart()
-					return m, m.ap.restartCmd()
+					return m, m.ap.restartAfterChange()
 				}
 				return m, nil
 			}
@@ -265,7 +283,53 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "m":
+			if m.ap != nil && m.ap.looping {
+				m.fail("looper attached (x clears) — monitor needs the free path")
+				return m, nil
+			}
 			return m.toggleMonitor()
+
+		case "l":
+			if m.ap == nil {
+				return m, nil
+			}
+			if m.ap.eng == nil {
+				m.fail("audio unavailable: %v", m.ap.initErr)
+				return m, nil
+			}
+			if !m.ap.looping {
+				// attach: the looper takes over the selected endpoints (the
+				// monitor path goes off; it needs both ends for itself)
+				if m.ap.monitor {
+					m.ap.monitor = false
+					m.ok("audio monitor off (looper takes over)")
+				}
+				m.ap.stopSimplex()
+				if m.ap.loop == nil {
+					m.ap.loop = looper.New(int(m.ap.channels()),
+						loopSampleRate, loopMaxSeconds)
+				}
+				return m, m.ap.looperRestartCmd()
+			}
+			switch st := m.ap.loop.Toggle(); st.String() {
+			case "rec":
+				m.ok("looper: recording (l closes the take)")
+			case "play":
+				m.ok("looper: playing %.1fs", m.ap.loop.Seconds())
+			case "overdub":
+				m.ok("looper: overdubbing %.1fs", m.ap.loop.Seconds())
+			default:
+				m.ok("looper: idle")
+			}
+			return m, nil
+
+		case "x":
+			if m.ap == nil || !m.ap.looping || m.ap.loop == nil {
+				return m, nil
+			}
+			m.ap.loop.Clear()
+			m.ok("looper: cleared")
+			return m, nil
 
 		case "r":
 			cmds := []tea.Cmd{m.portsCmd()}
@@ -372,10 +436,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.ap.takeMeter()
-		if m.ap.capturing {
+		if m.ap.metering() {
 			return m, meterTickCmd()
 		}
 		return m, nil
+
+	case loopStartedMsg:
+		if m.ap == nil {
+			return m, nil
+		}
+		m.ap.loopStream = msg.stream
+		m.ap.looping = true
+		m.ap.capturing = false
+		m.ap.monOn.Store(false)
+		m.ok("looper attached: %s → %s (l rec, x clear)", m.ap.inName(), m.ap.outName())
+		return m, meterTickCmd()
 	}
 
 	return m, nil

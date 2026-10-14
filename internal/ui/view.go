@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"tuiper/internal/audio"
+	"tuiper/internal/looper"
 )
 
 // view styles. Kept deliberately plain: faint the chrome, bright the events.
@@ -99,6 +100,9 @@ func audioLinesOf(m Model) int {
 		return 2 // heading + error line
 	}
 	n := 1 + 3 // heading + in/out/chan rows
+	if m.ap.looping && m.ap.loop != nil {
+		n++ // looper status row
+	}
 	if m.ap.focus != dropNone {
 		n += m.ap.dropdownCount() + 1 // options + controls hint
 	}
@@ -121,7 +125,7 @@ func (m Model) audioView(b *strings.Builder) {
 		return
 	}
 
-	write(headingStyle.Render(heading + " (i in • o out • c channels • m monitor)"))
+	write(headingStyle.Render(heading + " (i in • o out • c channels • m monitor • l looper • x clear)"))
 
 	// in row: selection + live meter
 	inRow := "  in : " + m.ap.inName() + "  " + meterBar(m.ap.dispPeak, m.ap.dispFrames, m.ap.dispDrops)
@@ -135,6 +139,10 @@ func (m Model) audioView(b *strings.Builder) {
 
 	chanName := map[int]string{chanStereo: "stereo (2)", chanMono: "mono (1)"}[m.ap.chans]
 	write(m.markRow(dropChan, "  chan: "+chanName, false))
+
+	if m.ap.looping && m.ap.loop != nil {
+		write(m.loopRow())
+	}
 
 	// expanded dropdown: the option list of the focused row
 	switch m.ap.focus {
@@ -152,6 +160,17 @@ func (m Model) audioView(b *strings.Builder) {
 		return
 	}
 	write(helpStyle.Render("  (↑/↓ j/k move • ⏎ select • esc cancel)"))
+}
+
+// loopRow renders the looper status line: state (bright while it makes
+// sound) plus the take/loop length.
+func (m Model) loopRow() string {
+	st := m.ap.loop.State()
+	stateTxt := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("205")).
+		Bold(st != looper.Idle).
+		Render(st.String())
+	return fmt.Sprintf("  loop: %s %5.1fs", stateTxt, m.ap.loop.Seconds())
 }
 
 // markRow renders an audio row with its dropdown affordance and activity
@@ -262,7 +281,7 @@ func (m Model) statusBar() string {
 		b.WriteString(okStyle.Render(m.status))
 	}
 	b.WriteString("\n")
-	b.WriteString(helpStyle.Render("q quit • ↑/k, ↓/j move • enter/space open/select • i,o,c audio dropdowns • m monitor • r refresh • esc cancels dropdown • ● midi in/out lamps top right"))
+	b.WriteString(helpStyle.Render("q quit • ↑/k, ↓/j move • enter/space open/select • i,o,c audio dropdowns • m monitor • l/x looper rec/clear • r refresh • esc cancels dropdown • ● midi in/out lamps top right"))
 
 	// NOTE: no trailing newline. The frame must occupy exactly m.height
 	// \n-separated rows; a trailing "\n" adds an empty row that overflows

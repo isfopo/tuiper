@@ -2,8 +2,9 @@
 
 A looper with a terminal UI (Bubble Tea), intended to run against a DAW
 (Ableton) via Ableton Link and MIDI. Currently past **Milestone 1: MIDI
-monitor** (`-engine test -demo` TUI, `-watch`) and exercising **Milestone 2:
-audio I/O** (`-audio` device check).
+monitor**, **Milestone 2: audio I/O** (device dropdowns, meter, monitor, and
+**Milestone 3's single-channel looper** (`l` record/dub, `x` clear, `-loop`
+headless check).
 
 ## Containerized development (Linux, recommended for TUI work)
 
@@ -80,6 +81,7 @@ for real-hardware testing and releases.
 | `.\tuiper.exe -watch 5s` | Headless: print events for 5 seconds (smoke test/debugging) |
 | `.\tuiper.exe -audio 5s` | Headless audio: enumerate WASAPI devices, meter default capture |
 | `.\tuiper.exe -audio 5s -loopback` | + feed capture into playback (feedback risk: mic into speakers!) |
+| `.\tuiper.exe -loop 2s` | Headless looper check: record a round trip, play the loop back, verify levels |
 
 Flags:
 
@@ -91,6 +93,11 @@ Flags:
   meters the default capture (peak in dBFS). `-loopback` additionally plays
   captured audio straight out of the default output — opt-in because on real
   hardware that is a live monitor/feedback loop.
+- `-loop <duration>` — headless looper check (milestone 3): records `<duration>`
+  of a synthesized test tone round trip (in the container rig the capture side
+  hears the null-sink monitor; on real hardware the mic hears the speakers),
+  closes the take, plays the loop back, then verifies the recorded content
+  level. Fails on an empty or silent loop.
 
 - `-inline` — run the TUI inline instead of in the alternate screen; handy
   in terminals with altscreen quirks (e.g. Zed's integrated terminal
@@ -107,6 +114,10 @@ Flags:
 - `m` — toggle the monitor path (capture → playback). In the container the
   rig makes this safe; on real hardware mic→speakers is a live feedback loop.
 - `r` — refresh lists (ports + audio devices)
+- `l` — looper: attach a duplex stream to the selected audio devices, then
+  cycle record → play → overdub → play (press again to close a take).
+  `x` clears the loop.
+- `x` — clear the looper (back to idle; the duplex stream stays attached)
 
 Audio captures start only after you pick a device; the `in` row shows a live
 peak meter (dBFS + frames/s) once capture runs.
@@ -117,11 +128,12 @@ status line (`events=… clocks=…`) plus the header activity dots.
 
 ## Project layout
 
-    cmd/tuiper/          entrypoint, flags, headless watch/audio modes
+    cmd/tuiper/          entrypoint, flags, headless watch/audio/loop modes
     internal/midi/       MIDI Engine (driver owner), Monitor (event stream)
-    internal/audio/      audio Engine over miniaudio (capture/playback/Devices)
+    internal/audio/      audio Engine over miniaudio (capture/playback/duplex/Devices)
+    internal/looper/     loop engine: state machine + s16 buffer math (TUI-agnostic)
     internal/ui/         terminal UI: model.go (state/logic), view.go (render),
-                         demo.go, audio_panel.go (device dropdowns/meter/monitor)
+                         demo.go, audio_panel.go (device dropdowns/meter/monitor/looper)
     tools/               zig cc CGO wrappers
     scripts/             container entrypoint (PipeWire rig) + its pipewire config
     build.ps1            Windows build script
@@ -132,8 +144,10 @@ status line (`events=… clocks=…`) plus the header activity dots.
 
 1. ✅ MIDI monitor (this milestone)
 2. ✅ Audio I/O headless core: enumeration, capture meter, capture→playback round trip
-3. 🚧 Device/channel selection in the TUI (audio dropdowns + meter, monitor path)
-4. Single-channel looper: record/overdub/play/stop/clear, tempo-synced edges
+3. ✅ Device/channel selection in the TUI (audio dropdowns + meter, monitor path)
+4. ✅ Single-channel looper core: record/overdub/play/clear (duplex stream, TUI
+   keys `l`/`x`, headless `-loop` check). Tempo-synced edges land with Ableton
+   Link (milestone 8).
 5. MIDI pedal mapping (config file: device, note/CC -> action)
 6. Waveform display + position cursor on the TUI
 7. Multichannel/track stack, loop-in-loop

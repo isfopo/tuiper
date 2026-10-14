@@ -10,6 +10,7 @@
 //	tuiper -engine test -demo    fake ports plus a synthetic event sender
 //	tuiper -audio 3s             headless audio device check
 //	tuiper -audio 3s -loopback   capture fed straight into playback
+//	tuiper -loop 2s              headless looper round-trip check (milestone 3)
 package main
 
 import (
@@ -31,12 +32,18 @@ func main() {
 	watch := flag.Duration("watch", 0, "headless mode: print events for the given duration")
 	audioDur := flag.Duration("audio", 0, "headless audio check: enumerate devices and meter capture (milestone 2)")
 	loopback := flag.Bool("loopback", false, "play captured audio back out (-audio mode; feedback risk on real hardware!)")
+	loopDur := flag.Duration("loop", 0, "headless looper check: record a synthetic round trip, play it back, verify levels (container rig or quiet room)")
 	inline := flag.Bool("inline", false, "run the TUI inline (no alternate screen; try this if the top line is missing in your terminal)")
 	flag.Parse()
 
 	if *audioDur > 0 {
 		// milestone 2 check: no MIDI engine needed at all
 		os.Exit(runAudio(*audioDur, *loopback))
+	}
+
+	if *loopDur > 0 {
+		// milestone 3 check: no MIDI engine needed at all either
+		os.Exit(runLoop(*loopDur))
 	}
 
 	eng, err := newEngine(*engineName)
@@ -55,8 +62,8 @@ func main() {
 	program := tea.NewProgram(model)
 	if !*inline {
 		// alternate screen is the normal TUI presentation; -inline opts out
-		// for terminals whose alt-screen handling is buggy (e.g. Zed's
-		// integrated terminal has hidden the top line of altscreen apps).
+		// for terminals whose alt-screen handling is quirky (e.g. Zed's
+		// integrated terminal bottom-aligns altscreen apps).
 		program = tea.NewProgram(model, tea.WithAltScreen())
 	}
 
