@@ -31,6 +31,7 @@ func main() {
 	watch := flag.Duration("watch", 0, "headless mode: print events for the given duration")
 	audioDur := flag.Duration("audio", 0, "headless audio check: enumerate devices and meter capture (milestone 2)")
 	loopback := flag.Bool("loopback", false, "play captured audio back out (-audio mode; feedback risk on real hardware!)")
+	inline := flag.Bool("inline", false, "run the TUI inline (no alternate screen; try this if the top line is missing in your terminal)")
 	flag.Parse()
 
 	if *audioDur > 0 {
@@ -51,9 +52,13 @@ func main() {
 	}
 
 	model := ui.New(eng, *demo)
-	program := tea.NewProgram(model,
-		tea.WithAltScreen(),
-	)
+	program := tea.NewProgram(model)
+	if !*inline {
+		// alternate screen is the normal TUI presentation; -inline opts out
+		// for terminals whose alt-screen handling is buggy (e.g. Zed's
+		// integrated terminal has hidden the top line of altscreen apps).
+		program = tea.NewProgram(model, tea.WithAltScreen())
+	}
 
 	final, err := program.Run()
 	if err != nil {

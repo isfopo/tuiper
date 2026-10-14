@@ -74,6 +74,7 @@ for real-hardware testing and releases.
 | Command | What it does |
 |---|---|
 | `.\tuiper.exe` | TUI on real MIDI ports (RtMidi via CGO: WinMM/CoreMIDI/ALSA) |
+| `.\tuiper.exe -inline` | TUI without the alternate screen (for terminals that hide the top line, e.g. Zed) |
 | `.\tuiper.exe -engine test` | TUI on fake loopback ports (no hardware or CGO needed) |
 | `.\tuiper.exe -engine test -demo` | Fake ports plus a synthetic event sender |
 | `.\tuiper.exe -watch 5s` | Headless: print events for 5 seconds (smoke test/debugging) |
@@ -90,6 +91,10 @@ Flags:
   meters the default capture (peak in dBFS). `-loopback` additionally plays
   captured audio straight out of the default output — opt-in because on real
   hardware that is a live monitor/feedback loop.
+
+- `-inline` — run the TUI inline instead of in the alternate screen; use in
+  terminals with altscreen quirks (Zed's integrated terminal has hidden the
+  first line of altscreen apps).
 
 ## TUI keys
 

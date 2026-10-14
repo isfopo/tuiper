@@ -214,18 +214,20 @@ func meterBar(peak int16, framesSince int64, drops uint64) string {
 }
 
 // lampView renders the two MIDI activity dots, right-aligned by the caller:
-// dark = faint hollow circle (idle), lit = bold filled dot in its color for
-// a short window after traffic (in green, out magenta).
+// dark = dark-gray hollow circle (idle), lit = bold filled dot in its color
+// for a short window after traffic (in green, out magenta). Plain color
+// attributes only — no faint/blink escapes, the least supported on Windows
+// consoles.
 func (m Model) lampView() string {
 	if m.lamps == nil {
 		return ""
 	}
-	dot := lipgloss.NewStyle().Faint(true).Render("○")
+	dark := lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render("○")
 	lit := func(stamp *atomic.Int64, onColor string) string {
 		if m.lamps.lit(stamp) {
 			return lipgloss.NewStyle().Foreground(lipgloss.Color(onColor)).Bold(true).Render("●")
 		}
-		return dot
+		return dark
 	}
 	return " " + lit(&m.lamps.in, "42") + " " + lit(&m.lamps.out, "205")
 }
