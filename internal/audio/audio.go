@@ -28,6 +28,12 @@ import (
 	"sync"
 	"unsafe"
 
+	/*
+		#include <stdlib.h>
+		#include <string.h>
+	*/
+	"C"
+
 	"github.com/gen2brain/malgo"
 )
 
@@ -47,6 +53,14 @@ func (d Device) String() string {
 		return fmt.Sprintf("[default] %s", d.Name)
 	}
 	return fmt.Sprintf("[        ] %s", d.Name)
+}
+
+// ID returns a copy of the opaque backend identifier to hand back through
+// Options.DeviceID. An empty result means "the system default device".
+func (d Device) ID() []byte {
+	id := make([]byte, len(d.id))
+	copy(id, d.id)
+	return id
 }
 
 // Options configures one stream. Zero values select comfortable defaults.
@@ -211,9 +225,12 @@ func (e *Engine) OpenCapture(opts Options, deliver func(samples []int16)) (*Stre
 		return nil, err
 	}
 
-	cfg, err := deviceConfig(malgo.Capture, opts)
+	cfg, devID, err := deviceConfig(malgo.Capture, opts)
 	if err != nil {
 		return nil, err
+	}
+	if devID != nil { // ID must stay alive until InitDevice copied it
+		defer C.free(devID)
 	}
 
 	dev, err := malgo.InitDevice(e.ctx.Context, cfg, malgo.DeviceCallbacks{
@@ -245,9 +262,12 @@ func (e *Engine) OpenPlayback(opts Options, pull func(n int) []int16) (*Stream, 
 		return nil, err
 	}
 
-	cfg, err := deviceConfig(malgo.Playback, opts)
+	cfg, devID, err := deviceConfig(malgo.Playback, opts)
 	if err != nil {
 		return nil, err
+	}
+	if devID != nil { // ID must stay alive until InitDevice copied it
+		defer C.free(devID)
 	}
 
 	dev, err := malgo.InitDevice(e.ctx.Context, cfg, malgo.DeviceCallbacks{
@@ -277,9 +297,12 @@ func (e *Engine) OpenPlayback(opts Options, pull func(n int) []int16) (*Stream, 
 }
 
 // deviceConfig builds a malgo config for one s16 stream. A specific device
-// triggers a Go-allocated copy of its ID, valid for the duration of
-// malgo.InitDevice (miniaudio copies it synchronously during device init).
-func deviceConfig(kind malgo.DeviceType, opts Options) (malgo.DeviceConfig, error) {
+// gets its ID copied into C memory (cgo forbids handing over a Go-managed
+// buffer; miniaudio copies the ID synchronously inside InitDevice). The C
+// pointer is returned to the caller, which must keep it alive across
+// malgo.InitDevice and then C.free it — passing a nil cDevID keeps the
+// system default.
+func deviceConfig(kind malgo.DeviceType, opts Options) (malgo.DeviceConfig, unsafe.Pointer, error) {
 	cfg := malgo.DefaultDeviceConfig(kind)
 	cfg.SampleRate = opts.rate()
 	cfg.PeriodSizeInMilliseconds = opts.latencyMS()
@@ -294,17 +317,19 @@ func deviceConfig(kind malgo.DeviceType, opts Options) (malgo.DeviceConfig, erro
 	}
 
 	if len(opts.DeviceID) == 0 {
-		return cfg, nil
+		return cfg, nil, nil
 	}
-	id := make([]byte, len(opts.DeviceID)) // heap: stays alive through init
-	copy(id, opts.DeviceID)
-	ptr := unsafe.Pointer(&id[0])
+	c := C.malloc(C.size_t(len(opts.DeviceID)))
+	if c == nil {
+		return cfg, nil, fmt.Errorf("alloc device id (%d bytes) failed", len(opts.DeviceID))
+	}
+	C.memcpy(c, unsafe.Pointer(&opts.DeviceID[0]), C.size_t(len(opts.DeviceID)))
 	if kind == malgo.Capture {
-		cfg.Capture.DeviceID = ptr
+		cfg.Capture.DeviceID = c
 	} else {
-		cfg.Playback.DeviceID = ptr
+		cfg.Playback.DeviceID = c
 	}
-	return cfg, nil
+	return cfg, c, nil
 }
 
 // samplesOf reinterprets an interleaved s16 byte buffer as samples. All
