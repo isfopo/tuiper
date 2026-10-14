@@ -1,7 +1,6 @@
-// Command tuiper is a looper built around a terminal user interface. It is
-// currently past milestone 1 (MIDI input monitor; -watch) and exercising
-// milestone 2 (audio device enumeration + capture meter + loopback round
-// trip; -audio).
+// Command tuiper is a terminal UI application template wired for MIDI and
+// audio I/O. It grew out of the tuiper looper: everything below is plumbing
+// a MIDI/Audio application needs, without application logic on top.
 //
 // Usage:
 //
@@ -10,7 +9,6 @@
 //	tuiper -engine test -demo    fake ports plus a synthetic event sender
 //	tuiper -audio 3s             headless audio device check
 //	tuiper -audio 3s -loopback   capture fed straight into playback
-//	tuiper -loop 2s              headless looper round-trip check (milestone 3)
 package main
 
 import (
@@ -30,20 +28,13 @@ func main() {
 	engineName := flag.String("engine", "rtmidi", "midi driver: rtmidi | test")
 	demo := flag.Bool("demo", false, "inject synthetic events (engine test only)")
 	watch := flag.Duration("watch", 0, "headless mode: print events for the given duration")
-	audioDur := flag.Duration("audio", 0, "headless audio check: enumerate devices and meter capture (milestone 2)")
+	audioDur := flag.Duration("audio", 0, "headless audio check: enumerate devices and meter capture")
 	loopback := flag.Bool("loopback", false, "play captured audio back out (-audio mode; feedback risk on real hardware!)")
-	loopDur := flag.Duration("loop", 0, "headless looper check: record a synthetic round trip, play it back, verify levels (container rig or quiet room)")
 	inline := flag.Bool("inline", false, "run the TUI inline (no alternate screen; try this if the top line is missing in your terminal)")
 	flag.Parse()
 
 	if *audioDur > 0 {
-		// milestone 2 check: no MIDI engine needed at all
 		os.Exit(runAudio(*audioDur, *loopback))
-	}
-
-	if *loopDur > 0 {
-		// milestone 3 check: no MIDI engine needed at all either
-		os.Exit(runLoop(*loopDur))
 	}
 
 	eng, err := newEngine(*engineName)

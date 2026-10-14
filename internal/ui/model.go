@@ -1,17 +1,20 @@
-// Package ui implements the tuiper terminal UI: a Bubble Tea based monitor
-// for MIDI and audio devices. It lists MIDI input ports (open one and watch
-// events scroll by) and audio endpoints (device/channel dropdowns, capture
-// meter, monitor path). Keyboard only, no mouse, no config files yet.
+// Package ui implements the template terminal UI: a Bubble Tea based monitor
+// that lists MIDI input ports and audio devices in a single modal (open/
+// close with 'd'), mirrors the applied selections in the main UI, and shows
+// a live capture meter. Application logic (loopers, sequencers, ...) goes on
+// top of this file's foundations.
 //
 // Structure notes (Elm architecture, as used by Bubble Tea):
 //
 //	Model   - all app state, plain struct
 //	Init()  - commands to run at startup
 //	Update() - (model, incoming message) -> (model, followup commands)
-//	View()  - render current state to a string
+//	View()  - render current state to a string (the devices modal overlays
+//	          the exact same frame; the base view occupies exactly one
+//	          terminal row per rendered line, see view.go)
 //
-// Driver details live in internal/midi and internal/audio; this package
-// only knows about ports/devices, events, and its own state.
+// Driver details live in internal/midi and internal/audio; this package only
+// knows about ports/devices, events, and its own state.
 package ui
 
 import (
@@ -21,11 +24,14 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"tuiper/internal/looper"
+	"github.com/sraaaaaaay/bubbletea-modal"
+
+	gomidi "gitlab.com/gomidi/midi/v2"
+
 	"tuiper/internal/midi"
 )
 
-// lamps are the upper-right MIDI activity indicators (dim by default, lit
+// lamps are the header's MIDI activity indicators (dim by default, lit
 // briefly by traffic). Stamps are atomics so the demo sender goroutine can
 // record outgoing sends while Update/View read them.
 type lamps struct {
@@ -58,28 +64,22 @@ func newLamps() *lamps { return &lamps{} }
 // blinkWindow is how long a lamp stays lit after observed MIDI traffic.
 const blinkWindow = 250 * time.Millisecond
 
-// Looper defaults: buffer format follows the attached duplex stream; the
-// capacity ceiling silently auto-closes long takes.
-const (
-	loopSampleRate = 48000 // audio.Options' default rate
-	loopMaxSeconds = 30.0  // ≈5.8 MB of s16 stereo
-)
-
 // Model holds all state of the monitor.
 type Model struct {
 	width, height int
 
-	eng    *midi.Engine // owns the MIDi
-	ports  []string     // input port names; index == port number
-	cursor int          // selected row in ports
-
+	eng     *midi.Engine // owns the midi driver
 	monitor *midi.Monitor
-	openNum int // port number of the active listener, -1 when closed
 
 	demo    bool // -demo mode: synthetic events on the test engine
 	demoCtl *DemoSender
 
-	ap *audioPanel // audio device dropdowns / meter / monitor (always non-nil after New)
+	ap *ioPanel // device lists/selections/streams (always non-nil after New)
+
+	// devices modal: covers the main frame while open (marker.Model is a
+	// value like Model itself; assignments only happen inside Update paths
+	// so they reach the rendered model)
+	modal modal.Model
 
 	// MIDI activity lamps: receive/send stamps (unix nanos) written via
 	// atomics from whichever goroutine observes traffic; View decides bright
@@ -93,25 +93,30 @@ type Model struct {
 	isErr   bool
 }
 
-// New returns a fresh monitor model. eng chooses the MIDI driver to work
-// with; demo enables the synthetic event sender (test engine only).
+// New returns a fresh model. eng chooses the MIDI driver to work with; demo
+// enables the synthetic event sender (test engine only).
 //
-// The monitor is created here, not in togglePort: Update and togglePort work
-// on value copies of Model, so an assignment inside togglePort would never
-// reach the model the TUI keeps rendering (a nil-monitor panic on the first
-// portOpenedMsg).
+// The monitor is created here, never in an Update-time helper: Update works
+// on value copies of Model, so something built lazily from a copy would never
+// reach the model the TUI keeps rendering.
 func New(eng *midi.Engine, demo bool) Model {
+	ap := newIoPanel()
 	m := Model{
 		eng:     eng,
 		monitor: midi.NewMonitor(eng),
 		demo:    demo,
-		ap:      newAudioPanel(),
+		ap:      ap,
 		lamps:   newLamps(),
-		openNum: -1,
-		status:  "ready",
+		status:  "d opens the device modal",
 		height:  24,
 		width:   80,
 	}
+	m.ap.openNum = -1
+	m.modal = modal.New(
+		modal.WithForeground(ap.modalContent),
+		modal.WithDimmedBackground(true),
+		modal.WithKeyMap("enter", "esc"),
+	)
 	if demo {
 		// created here (not in togglePort): togglePort works on value
 		// copies, so the sender would never reach the rendered model
@@ -162,26 +167,11 @@ type eventsStoppedMsg struct{}
 
 // ---- commands ---------------------------------------------------------
 
+// portsCmd enumerates midi input ports (async: driver enumeration can block).
 func (m Model) portsCmd() tea.Cmd {
 	return func() tea.Msg {
 		ports, err := m.eng.InputPorts()
 		return portsMsg{ports: ports, err: err}
-	}
-}
-
-func openPortCmd(m *midi.Monitor, num int) tea.Cmd {
-	return func() tea.Msg {
-		if err := m.Open(num); err != nil {
-			return portOpenErrMsg{num: num, err: err}
-		}
-		return portOpenedMsg{num: num}
-	}
-}
-
-func closePortCmd(m *midi.Monitor, num int) tea.Cmd {
-	return func() tea.Msg {
-		m.Stop()
-		return portClosedMsg{num: num}
 	}
 }
 
@@ -201,10 +191,34 @@ func waitForEventCmd(ch <-chan midi.Event) tea.Cmd {
 // ---- Init / Update ----------------------------------------------------
 
 func (m Model) Init() tea.Cmd {
-	return m.portsCmd()
+	return tea.Batch(m.portsCmd(), m.ap.listCmd())
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	updated, cmd := m.update(msg)
+	// keep the modal backdrop current: re-capture the base frame whenever
+	// state changed underneath it. NOTE: update() returned a fresh model
+	// value — refresh THAT one and return it, or the refresh silently
+	// vanishes (value-copy discipline cut me here twice).
+	if mm, ok := updated.(Model); ok && mm.modal.Opened() && changedFrame(msg) {
+		mm.modal, _ = mm.modal.Open(mm.baseView())
+		return mm, cmd
+	}
+	return updated, cmd
+}
+
+// changedFrame marks messages that can alter the base frame (backdrop).
+func changedFrame(msg tea.Msg) bool {
+	switch msg.(type) {
+	case tea.WindowSizeMsg, portsMsg, audioListMsg, captureStartedMsg,
+		playbackStartedMsg, audioMeterMsg, eventMsg, lampOffMsg,
+		portClosedMsg:
+		return true
+	}
+	return false
+}
+
+func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 
 	case tea.WindowSizeMsg:
@@ -212,131 +226,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.modal.Opened() {
+			return m.updateModalKeys(msg)
+		}
 		switch msg.String() {
 
 		case "q", "ctrl+c":
 			return m, tea.Quit
 
-		case "esc":
-			// esc first cancels an open dropdown, and only quits otherwise
-			if m.ap != nil && m.ap.focus != dropNone {
-				m.ap.focus = dropNone
-				return m, nil
-			}
+		case "esc", "ctrl+d":
 			return m, tea.Quit
 
-		case "up", "k":
-			if m.ap != nil && m.ap.focus != dropNone {
-				m.ap.moveCursor(-1)
-				return m, nil
-			}
-			if len(m.ports) > 0 {
-				m.cursor = (m.cursor - 1 + len(m.ports)) % len(m.ports)
-			}
-			return m, nil
-
-		case "down", "j":
-			if m.ap != nil && m.ap.focus != dropNone {
-				m.ap.moveCursor(1)
-				return m, nil
-			}
-			if len(m.ports) > 0 {
-				m.cursor = (m.cursor + 1) % len(m.ports)
-			}
-			return m, nil
-
-		case "enter", "space":
-			if m.ap != nil && m.ap.focus != dropNone {
-				which := m.ap.focus
-				changed := m.ap.pick()
-				if changed {
-					if which == dropChan && m.ap.looping {
-						// the loop buffer's channel layout is fixed at
-						// attach time; a change re-creates it (loop lost,
-						// and the status line says so)
-						m.ap.loop = looper.New(int(m.ap.channels()),
-							loopSampleRate, loopMaxSeconds)
-						m.ok("looper re-created (%d ch; loop cleared)",
-							int(m.ap.channels()))
-					}
-					m.ap.prepareRestart()
-					return m, m.ap.restartAfterChange()
-				}
-				return m, nil
-			}
-			return m, m.togglePort()
-
-		case "i", "o", "c":
-			if m.ap == nil {
-				return m, nil
-			}
-			if m.ap.eng == nil {
-				m.fail("audio unavailable: %v", m.ap.initErr)
-				return m, nil
-			}
-			m.ap.toggleDropdown(map[string]int{"i": dropIn, "o": dropOut, "c": dropChan}[msg.String()])
-			if m.ap.ins == nil && m.ap.outs == nil {
-				// first audio interaction: enumerate in the background;
-				// the dropdown opens immediately and fills on arrival
-				return m, m.ap.listCmd()
-			}
-			return m, nil
+		case "d", "?":
+			// open the devices modal over the current frame; refresh the
+			// device lists in the background so it fills in as it arrives
+			var open tea.Cmd
+			m.modal, open = m.modal.Open(m.baseView())
+			return m, tea.Batch(open, m.portsCmd(), m.ap.listCmd())
 
 		case "m":
-			if m.ap != nil && m.ap.looping {
-				m.fail("looper attached (x clears) — monitor needs the free path")
-				return m, nil
-			}
 			return m.toggleMonitor()
 
-		case "l":
-			if m.ap == nil {
-				return m, nil
-			}
-			if m.ap.eng == nil {
-				m.fail("audio unavailable: %v", m.ap.initErr)
-				return m, nil
-			}
-			if !m.ap.looping {
-				// attach: the looper takes over the selected endpoints (the
-				// monitor path goes off; it needs both ends for itself)
-				if m.ap.monitor {
-					m.ap.monitor = false
-					m.ok("audio monitor off (looper takes over)")
-				}
-				m.ap.stopSimplex()
-				if m.ap.loop == nil {
-					m.ap.loop = looper.New(int(m.ap.channels()),
-						loopSampleRate, loopMaxSeconds)
-				}
-				return m, m.ap.looperRestartCmd()
-			}
-			switch st := m.ap.loop.Toggle(); st.String() {
-			case "rec":
-				m.ok("looper: recording (l closes the take)")
-			case "play":
-				m.ok("looper: playing %.1fs", m.ap.loop.Seconds())
-			case "overdub":
-				m.ok("looper: overdubbing %.1fs", m.ap.loop.Seconds())
-			default:
-				m.ok("looper: idle")
-			}
-			return m, nil
-
-		case "x":
-			if m.ap == nil || !m.ap.looping || m.ap.loop == nil {
-				return m, nil
-			}
-			m.ap.loop.Clear()
-			m.ok("looper: cleared")
-			return m, nil
-
 		case "r":
-			cmds := []tea.Cmd{m.portsCmd()}
-			if m.ap != nil {
-				cmds = append(cmds, m.ap.listCmd())
-			}
-			return m, tea.Batch(cmds...)
+			return m, tea.Batch(m.portsCmd(), m.ap.listCmd())
 		}
 
 	case portsMsg:
@@ -344,15 +256,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.fail("list ports: %v", msg.err)
 			return m, nil
 		}
-		m.ports = msg.ports
-		if m.cursor >= len(m.ports) {
-			m.cursor = 0
+		m.ap.ports = msg.ports
+		if c := m.ap.cursors[secMidi]; c >= len(msg.ports) {
+			m.ap.cursors[secMidi] = 0
 		}
 		return m, nil
 
 	case portOpenedMsg:
-		m.openNum = msg.num
-		m.ok("listening: %s", m.ports[msg.num])
+		m.ap.openNum = msg.num
+		m.ok("listening: %s", m.ap.ports[msg.num])
 		cmds := []tea.Cmd{waitForEventCmd(m.monitor.Events())}
 		if m.demo && m.demoCtl != nil {
 			m.demoCtl.Start()
@@ -364,7 +276,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case portClosedMsg:
-		m.openNum = -1
+		m.ap.openNum = -1
 		if m.demoCtl != nil {
 			<-m.demoCtl.Stop()
 			m.demoCtl = nil
@@ -389,32 +301,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// ---- audio panel -----------------------------------------------------
 
 	case audioListMsg:
-		if m.ap == nil {
-			return m, nil
-		}
 		m.ap.ins = msg.ins
 		m.ap.outs = msg.outs
-		// re-clamp stored selections against the new lists
-		if m.ap.inSel > len(msg.ins) {
-			m.ap.inSel = 0
+		// clamp cursors/selections against the new lists (2 = default row
+		// always exists for in/out, so only idx > len is invalid)
+		for sec, rows := range map[int]int{secIn: len(m.ap.inOptions()), secOut: len(m.ap.outOptions())} {
+			if m.ap.cursors[sec] >= rows && rows > 0 {
+				m.ap.cursors[sec] = 0
+			}
 		}
-		if m.ap.outSel > len(msg.outs) {
-			m.ap.outSel = 0
+		if len(m.ap.ins) > 0 && m.ap.sel[secIn] > len(m.ap.ins) {
+			m.ap.sel[secIn] = 0
 		}
-		m.ok("audio: %d capture / %d playback devices", len(msg.ins), len(msg.outs))
+		if len(m.ap.outs) > 0 && m.ap.sel[secOut] > len(m.ap.outs) {
+			m.ap.sel[secOut] = 0
+		}
+		m.ok("devices: %d midi / %d capture / %d playback", len(m.ap.ports), len(msg.ins), len(msg.outs))
 		return m, nil
 
 	case audioErrMsg:
-		if m.ap == nil {
-			return m, nil
-		}
 		m.fail("audio: %v", msg.err)
 		return m, nil
 
 	case captureStartedMsg:
-		if m.ap == nil {
-			return m, nil
-		}
 		m.ap.capStream = msg.stream
 		m.ap.capturing = true
 		// the monitor gate opens fully only once playback is up too
@@ -423,55 +332,165 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, meterTickCmd()
 
 	case playbackStartedMsg:
-		if m.ap == nil {
-			return m, nil
-		}
 		m.ap.playStream = msg.stream
 		m.ap.monOn.Store(m.ap.monitor)
 		m.ok("audio monitor: %s → %s", m.ap.inName(), m.ap.outName())
 		return m, nil
 
 	case audioMeterMsg:
-		if m.ap == nil {
-			return m, nil
-		}
 		m.ap.takeMeter()
-		if m.ap.metering() {
+		if m.ap.capturing {
 			return m, meterTickCmd()
 		}
 		return m, nil
-
-	case loopStartedMsg:
-		if m.ap == nil {
-			return m, nil
-		}
-		m.ap.loopStream = msg.stream
-		m.ap.looping = true
-		m.ap.capturing = false
-		m.ap.monOn.Store(false)
-		m.ok("looper attached: %s → %s (l rec, x clear)", m.ap.inName(), m.ap.outName())
-		return m, meterTickCmd()
 	}
 
 	return m, nil
 }
 
+// updateModalKeys routes keys that arrive while the devices modal is open:
+// the modal library sees every key (its esc/confirm semantics stay intact),
+// while navigation/apply are handled by the panel and the model.
+func (m Model) updateModalKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	var mod tea.Model
+	mod, cmd = m.modal.Update(msg)
+	m.modal = mod.(modal.Model)
+
+	switch msg.String() {
+	case "esc":
+		// the modal library closed itself; drop back to the main frame
+		m.ok("devices closed")
+		return m, cmd
+
+	case "up", "k":
+		m.ap.move(-1)
+		return m, nil
+
+	case "down", "j":
+		m.ap.move(1)
+		return m, nil
+
+	case "tab":
+		m.ap.switchSection(1)
+		return m, nil
+
+	case "shift+tab":
+		m.ap.switchSection(-1)
+		return m, nil
+
+	case "r":
+		return m, tea.Batch(cmd, m.portsCmd(), m.ap.listCmd())
+
+	case "enter":
+		// the modal's confirm cmd is a no-op; the apply semantics are ours
+		return m, tea.Batch(cmd, m.applySelection())
+	}
+
+	return m, cmd
+}
+
+// applySelection applies the cursor row of the active modal section:
+//
+//	midi in — opens/closes the pointed-at port (stream action)
+//	audio rows — update the stored selection and re-open the streams
+func (m Model) applySelection() tea.Cmd {
+	switch m.ap.section {
+	case secMidi:
+		num := m.ap.midiPort()
+		if num < 0 {
+			m.fail("no midi input ports")
+			return nil
+		}
+		if m.ap.openNum == num {
+			return closePortCmd(m.monitor, num)
+		}
+		return openPortCmd(m.monitor, num)
+
+	case secIn:
+		// applying a capture device (re)opens capture right away, even when
+		// the row is the already-applied selection: enter means "open this"
+		// (meter turns on the main row)
+		m.ap.selectRow()
+		m.ap.prepareRestart()
+		m.ok("audio in: %s", m.ap.inName())
+		return m.ap.restartCmd()
+
+	case secOut, secChan:
+		if !m.ap.selectRow() {
+			m.ok("%s: %s (unchanged)", sectionNames[m.ap.section], m.ap.appliedName(m.ap.section))
+			return nil
+		}
+		if m.ap.streaming() || m.ap.monitor {
+			m.ap.prepareRestart()
+			return m.ap.restartCmd()
+		}
+		// nothing streaming: a playback/channel pick is stored for the next
+		// session instead of force-starting capture
+		m.ok("%s: %s", sectionNames[m.ap.section], m.ap.appliedName(m.ap.section))
+		return nil
+	}
+	return nil
+}
+
+// openPortCmd / closePortCmd wrap monitor stream actions in tea.Cmds.
+
+func openPortCmd(m *midi.Monitor, num int) tea.Cmd {
+	return func() tea.Msg {
+		if err := m.Open(num); err != nil {
+			return portOpenErrMsg{num: num, err: err}
+		}
+		return portOpenedMsg{num: num}
+	}
+}
+
+func closePortCmd(m *midi.Monitor, num int) tea.Cmd {
+	return func() tea.Msg {
+		m.Stop()
+		return portClosedMsg{num: num}
+	}
+}
+
+// toggleMonitor switches the capture→playback monitor path. Turning it on
+// re-opens both ends (device consistency); turning it off stops playback only
+// so capture keeps metering.
+func (m Model) toggleMonitor() (tea.Model, tea.Cmd) {
+	if m.ap.eng == nil {
+		m.fail("audio unavailable: %v", m.ap.initErr)
+		return m, nil
+	}
+	m.ap.monitor = !m.ap.monitor
+	if m.ap.monitor {
+		m.ap.monOn.Store(false)
+		m.ap.prepareRestart()
+		m.ok("audio monitor on: %s → %s", m.ap.inName(), m.ap.outName())
+		return m, m.ap.restartCmd()
+	}
+	if m.ap.playStream != nil {
+		m.ap.playStream.Stop()
+		m.ap.playStream = nil
+	}
+	m.ap.monOn.Store(false)
+	m.ok("audio: monitor off")
+	return m, nil
+}
+
 // updateEvent keeps the counters fresh, keeps the subscription alive, and
-// lights the in-lamp. (A scrolling event log used to live here; traffic now
-// shows as counters plus the activity lamps instead.)
+// lights the in-lamp. Traffic shows as counters plus the activity lamps.
 func (m Model) updateEvent(ev midi.Event) (tea.Model, tea.Cmd) {
 	m.events++
 	if m.lamps != nil {
 		m.lamps.in.Store(time.Now().UnixNano())
 	}
 
-	line := ev.String()
-	// Clock spam gets its own counter to keep the log useful
-	if line == "TimingClock" {
+	// Clock spam gets its own counter to keep counters meaningful. (Match on
+	// the parsed message type: ev.String() carries a timestamp prefix, so a
+	// string compare silently counted nothing.)
+	if ev.Msg.Type() == gomidi.TimingClockMsg {
 		m.clocks++
-		return m, m.lamps.withLampOff(waitForEventCmd(m.monitor.Events()))
+	} else {
+		m.dropped = m.monitor.Dropped()
 	}
-	m.dropped = m.monitor.Dropped()
 	return m, m.lamps.withLampOff(waitForEventCmd(m.monitor.Events()))
 }
 
@@ -488,51 +507,6 @@ func (l *lamps) withLampOff(cmd tea.Cmd) tea.Cmd {
 		return lampOffCmd()
 	}
 	return tea.Batch(cmd, lampOffCmd())
-}
-
-// togglePort opens the selected port, or closes the active one.
-func (m Model) togglePort() tea.Cmd {
-	if len(m.ports) == 0 {
-		m.fail("no input ports available")
-		return nil
-	}
-
-	if m.monitor == nil {
-		m.monitor = midi.NewMonitor(m.eng)
-	}
-
-	num := m.cursor
-	if m.openNum == num {
-		return closePortCmd(m.monitor, num)
-	}
-	return openPortCmd(m.monitor, num)
-}
-
-// toggleMonitor switches the capture→playback monitor path. Turning it on
-// re-opens both ends (device consistency); turning it off stops playback only
-// so capture keeps metering.
-func (m Model) toggleMonitor() (tea.Model, tea.Cmd) {
-	if m.ap == nil {
-		return m, nil
-	}
-	if m.ap.eng == nil {
-		m.fail("audio unavailable: %v", m.ap.initErr)
-		return m, nil
-	}
-	m.ap.monitor = !m.ap.monitor
-	if m.ap.monitor {
-		m.ap.monOn.Store(false)
-		m.ap.prepareRestart()
-		m.ok("audio monitor on (beware feedback on real hardware)")
-		return m, m.ap.restartCmd()
-	}
-	if m.ap.playStream != nil {
-		m.ap.playStream.Stop()
-		m.ap.playStream = nil
-	}
-	m.ap.monOn.Store(false)
-	m.ok("audio: monitor off")
-	return m, nil
 }
 
 // ---- update helpers ---------------------------------------------------

@@ -8,7 +8,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"tuiper/internal/audio"
-	"tuiper/internal/looper"
 )
 
 // view styles. Kept deliberately plain: faint the chrome, bright the events.
@@ -19,34 +18,45 @@ var (
 			MarginRight(2)
 
 	headingStyle = lipgloss.NewStyle().
-			Faint(true)
+			Foreground(lipgloss.Color("245"))
 
-	selectedStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("212"))
+	helpStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("242"))
+
+	okStyle = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("245"))
+
+	errStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("203"))
 
 	openMarkStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("42"))
 
-	errStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("196")).
-			Bold(true)
-
-	okStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("250"))
-
-	helpStyle = lipgloss.NewStyle().
-			Faint(true)
+	selectedStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("205"))
 )
 
+// View renders the model. While the devices modal is open the modal library
+// composites the (dimmed) base frame with the foreground box, so the return
+// value of View() switches content without the renderer noticing a size
+// change: both renderings occupy exactly m.height lines.
 func (m Model) View() string {
+	if m.modal.Opened() {
+		return m.modal.View()
+	}
+	return m.baseView()
+}
+
+// baseView is the main frame: title + lamps, the selected I/O summary with
+// the capture meter, and the status bar — exactly m.height lines, no
+// trailing newline.
+func (m Model) baseView() string {
 	var b strings.Builder
 
 	// header -----------------------------------------------------------
 	if m.width > 0 {
-		title := titleStyle.Render("◉ tuiper")
-		sub := headingStyle.Render("midi + audio monitor")
-		left := title + sub
+		left := titleStyle.Render("◉ tuiper template") +
+			headingStyle.Render("midi + audio io")
 		lamps := m.lampView()
 		gap := m.width - lipgloss.Width(left) - lipgloss.Width(lamps)
 		if gap < 1 {
@@ -55,29 +65,11 @@ func (m Model) View() string {
 		b.WriteString(left + strings.Repeat(" ", gap) + lamps + "\n\n")
 	}
 
-	// ports --------------------------------------------------------------
-	b.WriteString(headingStyle.Render("midi (↑/↓ select, ⏎ open/close, r refresh)") + "\n")
-
-	if len(m.ports) == 0 {
-		b.WriteString("  " + okStyle.Render("(no input ports — connect your audio interface / pedal)") + "\n")
-	} else {
-		for i, p := range m.ports {
-			cursor := "  "
-			name := p
-			if i == m.cursor {
-				cursor = "> "
-				name = selectedStyle.Render(p)
-			}
-			state := "  "
-			if i == m.openNum {
-				state = openMarkStyle.Render("•")
-			}
-			b.WriteString("  " + cursor + name + " " + state + "\n")
-		}
-	}
-
-	// audio panel ---------------------------------------------------------
-	m.audioView(&b)
+	// selected io summary ------------------------------------------------
+	write := func(s string) { b.WriteString(s + "\n") }
+	write(m.midiLine())
+	write(m.audioInLine())
+	write(m.audioOutLine())
 
 	// fill the remainder so the status bar stays on the bottom row
 	padding := m.height - m.reserved()
@@ -89,123 +81,43 @@ func (m Model) View() string {
 	return b.String()
 }
 
-// audioLinesOf counts the lines the audio panel occupies, matching exactly
-// what audioView renders — reserved must never drift from the drawn output
-// or the status bar slides around.
-func audioLinesOf(m Model) int {
-	if m.ap == nil {
-		return 0
-	}
-	if m.ap.eng == nil {
-		return 2 // heading + error line
-	}
-	n := 1 + 3 // heading + in/out/chan rows
-	if m.ap.looping && m.ap.loop != nil {
-		n++ // looper status row
-	}
-	if m.ap.focus != dropNone {
-		n += m.ap.dropdownCount() + 1 // options + controls hint
-	}
-	return n
+// ioLinesOf counts the summary lines between the header and the status bar.
+func ioLinesOf() int {
+	return 3 // midi in / audio in / audio out
 }
 
-// audioView renders the audio panel into b. Rows for device selection are
-// the dropdowns proper: pressing the key in front of a row expands the
-// option list right below it.
-func (m Model) audioView(b *strings.Builder) {
-	if m.ap == nil {
-		return
+// reserved computes the number of lines the frame occupies besides padding:
+// title + blank + summary lines + status bar (2 lines).
+func (m Model) reserved() int {
+	return 2 + ioLinesOf() + 2
+}
+
+// midiLine renders the selected/open midi port.
+func (m Model) midiLine() string {
+	ap := m.ap
+	name := ap.appliedName(secMidi)
+	if ap.openNum >= 0 {
+		return okStyle.Render("midi in : ") + name + " " + openMarkStyle.Render("●")
 	}
-	write := func(s string) { b.WriteString(s + "\n") }
+	return okStyle.Render("midi in : ") + headingStyle.Render(name)
+}
 
-	heading := "audio"
-	if m.ap.eng == nil {
-		write(headingStyle.Render(heading))
-		write("  " + errStyle.Render("(unavailable: "+m.ap.initErr.Error()+")"))
-		return
+// audioInLine renders the applied capture device with the live meter.
+func (m Model) audioInLine() string {
+	row := okStyle.Render("audio in: ") + m.ap.inName()
+	if m.ap.capturing {
+		row += "  " + meterBar(m.ap.dispPeak, m.ap.dispFrames, m.ap.dispDrops)
 	}
+	return row
+}
 
-	write(headingStyle.Render(heading + " (i in • o out • c channels • m monitor • l looper • x clear)"))
-
-	// in row: selection + live meter
-	inRow := "  in : " + m.ap.inName() + "  " + meterBar(m.ap.dispPeak, m.ap.dispFrames, m.ap.dispDrops)
-	write(m.markRow(dropIn, inRow, m.ap.capturing))
-
-	outRow := "  out: " + m.ap.outName()
+// audioOutLine renders the applied playback device (and monitor state).
+func (m Model) audioOutLine() string {
+	row := okStyle.Render("audio out: ") + m.ap.outName()
 	if m.ap.monitor {
-		outRow += "   [monitor → on]"
+		row += "  " + headingStyle.Render("(monitor — m toggles)")
 	}
-	write(m.markRow(dropOut, outRow, m.ap.playStream != nil))
-
-	chanName := map[int]string{chanStereo: "stereo (2)", chanMono: "mono (1)"}[m.ap.chans]
-	write(m.markRow(dropChan, "  chan: "+chanName, false))
-
-	if m.ap.looping && m.ap.loop != nil {
-		write(m.loopRow())
-	}
-
-	// expanded dropdown: the option list of the focused row
-	switch m.ap.focus {
-	case dropIn:
-		m.dropdownView(b, m.ap.inOptions(), m.ap.inSel)
-	case dropOut:
-		m.dropdownView(b, m.ap.outOptions(), m.ap.outSel)
-	case dropChan:
-		opts := make([]string, len(channelCounts))
-		for i, c := range channelCounts {
-			opts[i] = fmt.Sprintf("%d channels", c)
-		}
-		m.dropdownViewStrings(b, opts, m.ap.cursor)
-	default:
-		return
-	}
-	write(helpStyle.Render("  (↑/↓ j/k move • ⏎ select • esc cancel)"))
-}
-
-// loopRow renders the looper status line: state (bright while it makes
-// sound) plus the take/loop length.
-func (m Model) loopRow() string {
-	st := m.ap.loop.State()
-	stateTxt := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("205")).
-		Bold(st != looper.Idle).
-		Render(st.String())
-	return fmt.Sprintf("  loop: %s %5.1fs", stateTxt, m.ap.loop.Seconds())
-}
-
-// markRow renders an audio row with its dropdown affordance and activity
-// mark. It highlights the row whose dropdown is currently open.
-func (m Model) markRow(dropdown int, row string, active bool) string {
-	name := row
-	if m.ap.focus == dropdown {
-		name = "  > " + selectedStyle.Render(strings.TrimPrefix(row, "  "))
-	} else if active {
-		name += " " + openMarkStyle.Render("•")
-	}
-	return name
-}
-
-// dropdownView renders the options of a device dropdown, cursor included.
-func (m Model) dropdownView(b *strings.Builder, opts []audio.Device, sel int) {
-	strs := make([]string, len(opts))
-	for i, o := range opts {
-		marker := ""
-		if i == sel {
-			marker = "[current] "
-		}
-		strs[i] = marker + o.String()
-	}
-	m.dropdownViewStrings(b, strs, m.ap.cursor)
-}
-
-func (m Model) dropdownViewStrings(b *strings.Builder, opts []string, cursor int) {
-	for i, o := range opts {
-		if i == cursor {
-			b.WriteString("    > " + selectedStyle.Render(o) + "\n")
-			continue
-		}
-		b.WriteString("      " + o + "\n")
-	}
+	return row
 }
 
 // meterBar renders the capture level: a fixed-width bar plus dBFS text; the
@@ -223,20 +135,20 @@ func meterBar(peak int16, framesSince int64, drops uint64) string {
 	bar := strings.Repeat("#", filled) + strings.Repeat("-", width-filled)
 	rate := ""
 	if framesSince > 0 {
-		rate = fmt.Sprintf(" %4.1fkf/s", float64(framesSince)/1000/0.2)
+		// knit the window rate into the readout (frames/200ms tick)
+		rate = fmt.Sprintf(" %dkf/s", framesSince*5/1000)
 	}
 	dropTxt := ""
 	if drops > 0 {
-		dropTxt = errStyle.Render(fmt.Sprintf(" drops=%d", drops))
+		dropTxt = " dropped:" + fmt.Sprint(drops)
 	}
 	return okStyle.Render(fmt.Sprintf("[%s] %6.1fdBFS%s%s", bar, db, rate, dropTxt))
 }
 
-// lampView renders the two MIDI activity dots, right-aligned by the caller:
-// dark = dark-gray hollow circle (idle), lit = bold filled dot in its color
-// for a short window after traffic (in green, out magenta). Plain color
-// attributes only — no faint/blink escapes, the least supported on Windows
-// consoles.
+// lampView renders the two MIDI activity dots: dark = dark-gray hollow
+// circle (idle), lit = bold filled dot in its color for a short window after
+// traffic (in green, out magenta). Plain color attributes only — no
+// faint/blink escapes, the least supported on Windows terminals.
 func (m Model) lampView() string {
 	if m.lamps == nil {
 		return ""
@@ -251,41 +163,20 @@ func (m Model) lampView() string {
 	return " " + lit(&m.lamps.in, "42") + " " + lit(&m.lamps.out, "205")
 }
 
-// reserved computes the number of lines occupied above the status bar:
-// title block + midi heading + ports + audio panel + status bar (2 lines).
-func (m Model) reserved() int {
-	return 2 + 1 + len(m.ports) + audioLinesOf(m) + 2
-}
-
 func (m Model) statusBar() string {
 	var b strings.Builder
 
-	if m.monitor != nil {
-		state, stateStyle := "idle", "250"
-		if m.monitor.Active() {
-			state = "live"
-		}
-		style := lipgloss.NewStyle().Foreground(lipgloss.Color(stateStyle)).Bold(state == "live")
-		b.WriteString(style.Render("["+state+"]") + " ")
-	}
-
-	b.WriteString(okStyle.Render(fmt.Sprintf("events=%d clocks=%d dropped=%d", m.events, m.clocks, m.dropped)))
-	b.WriteString("  ")
-	if m.ap != nil {
-		b.WriteString(m.ap.chip())
-	}
-	b.WriteString("  ")
+	b.WriteString(m.ap.chip() + "  ")
 	if m.isErr {
 		b.WriteString(errStyle.Render(m.status))
 	} else {
 		b.WriteString(okStyle.Render(m.status))
 	}
 	b.WriteString("\n")
-	b.WriteString(helpStyle.Render("q quit • ↑/k, ↓/j move • enter/space open/select • i,o,c audio dropdowns • m monitor • l/x looper rec/clear • r refresh • esc cancels dropdown • ● midi in/out lamps top right"))
+	b.WriteString(helpStyle.Render("q quit • d devices • m monitor • r refresh • esc quit • ● midi activity"))
 
 	// NOTE: no trailing newline. The frame must occupy exactly m.height
 	// \n-separated rows; a trailing "\n" adds an empty row that overflows
-	// the terminal and makes bubbletea's renderer drop rows from the TOP
-	// (which silently ate the header line and lamps in every terminal).
+	// the terminal and makes bubbletea's renderer drop rows from the TOP.
 	return b.String()
 }
